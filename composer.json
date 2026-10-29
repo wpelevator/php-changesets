@@ -1,0 +1,17 @@
+{
+	"name": "wpelevator/php-changesets",
+	"description": "Changeset-based release preparation for PHP projects",
+	"license": "MIT",
+	"type": "library",
+	"require": {
+		"php": ">=7.4"
+	},
+	"autoload": {
+		"classmap": [
+			"php/"
+		]
+	},
+	"bin": [
+		"bin/changesets"
+	]
+}
