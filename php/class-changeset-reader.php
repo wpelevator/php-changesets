@@ -3,7 +3,7 @@
 namespace WPElevator\PHP_Changesets;
 
 /**
- * Read the supported multi-package changeset format from a safe directory.
+ * Read and format the supported multi-package changeset format, from a safe directory.
  *
  * Frontmatter is a mapping of package name to patch|minor|major bump; one
  * changeset may name several packages, and empty frontmatter records an
@@ -59,6 +59,21 @@ final class Changeset_Reader {
 		}
 
 		return $records;
+	}
+
+	/**
+	 * Format a changeset file, like the one that `changeset add` writes.
+	 *
+	 * @param array<string, string> $packages Package name to bump, empty for no release.
+	 */
+	public function format( array $packages, string $summary ): string {
+		$lines = [];
+
+		foreach ( $packages as $package => $bump ) {
+			$lines[] = json_encode( (string) $package, JSON_UNESCAPED_SLASHES ) . ': ' . $bump . "\n";
+		}
+
+		return "---\n" . implode( '', $lines ) . "---\n\n" . trim( $summary ) . "\n";
 	}
 
 	/**

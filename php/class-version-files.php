@@ -13,10 +13,13 @@ final class Version_Files {
 
 	private Tag_Format $tag_format;
 
-	public function __construct( Project_Files $files ) {
+	private Git $git;
+
+	public function __construct( Project_Files $files, ?Git $git = null, ?Semver $semver = null, ?Tag_Format $tag_format = null ) {
 		$this->files = $files;
-		$this->semver = new Semver();
-		$this->tag_format = new Tag_Format();
+		$this->git = $git ?? new Git( $files->get_root() );
+		$this->semver = $semver ?? new Semver();
+		$this->tag_format = $tag_format ?? new Tag_Format();
 	}
 
 	public function read_current( array $source, ?array $package = null ): string {
@@ -138,7 +141,7 @@ final class Version_Files {
 		}
 
 		if ( null === $match || $match['value'] !== $old_version ) {
-			throw new Release_Exception( 'Version in ' . $file . ' does not match ' . $old_version . '.' );
+			$this->throw_mismatch( $file, $contents, $match, $old_version );
 		}
 
 		if ( $old_version === $new_version ) {
@@ -229,33 +232,33 @@ final class Version_Files {
 	}
 
 	/**
-	 * @return string[] The git tags of the canonical project root.
+	 * Fail on a version that doesn't match, with the file and line of the
+	 * version for an annotation.
+	 *
+	 * @param array{value: string, offset: int, length: int}|null $found
+	 */
+	private function throw_mismatch( string $file, string $contents, ?array $found, string $expected ): void {
+		$message = null === $found
+			? 'Version is missing from ' . $file . ', expected ' . $expected . '.'
+			: 'Version in ' . $file . ' is ' . $found['value'] . ', expected ' . $expected . '.';
+		$problem = [
+			'message' => $message,
+			'file' => $file,
+			'title' => 'Version mismatch',
+		];
+
+		if ( null !== $found ) {
+			$problem['line'] = substr_count( substr( $contents, 0, $found['offset'] ), "\n" ) + 1;
+		}
+
+		throw new Release_Exception( $message, 0, null, [ $problem ] );
+	}
+
+	/**
+	 * @return string[] The git tags of the repository.
 	 */
 	private function tags(): array {
-		$root = $this->files->get_root();
-		$process = proc_open(
-			[ 'git', '-C', $root, 'tag', '--list' ],
-			[
-				0 => [ 'pipe', 'r' ],
-				1 => [ 'pipe', 'w' ],
-				2 => [ 'pipe', 'w' ],
-			],
-			$pipes
-		);
-
-		if ( ! is_resource( $process ) ) {
-			throw new Release_Exception( 'Unable to run git.' );
-		}
-
-		fclose( $pipes[0] );
-		$output = stream_get_contents( $pipes[1] );
-		$error = stream_get_contents( $pipes[2] );
-		fclose( $pipes[1] );
-		fclose( $pipes[2] );
-
-		if ( 0 !== proc_close( $process ) ) {
-			throw new Release_Exception( 'Unable to list git tags: ' . trim( $error ) );
-		}
+		$output = $this->git->run( [ 'tag', '--list' ] );
 
 		return '' === $output ? [] : explode( "\n", rtrim( $output, "\n" ) );
 	}

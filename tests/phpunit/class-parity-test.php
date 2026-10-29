@@ -92,7 +92,7 @@ MJS
 		file_put_contents( $this->root . '/.changeset/a-feature.md', "---\n\"example/alpha\": minor\n---\n\nAdd a feature.\n" );
 		file_put_contents( $this->root . '/.changeset/empty.md', "---\n---\n" );
 
-		$php = json_decode( $this->success( [ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changesets', 'status', '--root', $this->root, '--json' ] ), true );
+		$php = json_decode( $this->success( [ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changeset', 'status', '--root', $this->root, '--json' ] ), true );
 		$node = json_decode( $this->success( [ 'node', $node_cli, 'changeset-status', '--since', 'HEAD', '--json' ] ), true );
 
 		$this->assertIsArray( $php, 'PHP status should return JSON.' );

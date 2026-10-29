@@ -187,20 +187,63 @@ PHP
 		$this->assertTrue( $config['packages'][0]['version']['to'][1]['ifPresent'], 'The inferred stable tag is skipped when the readme misses a tag.' );
 	}
 
-	public function test_inference_adds_to_a_readme_changelog_section(): void {
+	public function test_inference_keeps_the_readme_changelog_opt_in(): void {
 		file_put_contents( $this->root . '/example.php', "<?php\n/*\nPlugin Name: Example\nVersion: 1.2.3\n*/\n" );
 		file_put_contents( $this->root . '/readme.txt', "Stable tag: 1.2.3\n\n== Changelog ==\n" );
 
-		$this->assertTrue( $this->loader->load()['readmeChangelog'], 'A readme with a changelog section gets the release sections.' );
+		$this->assertFalse( $this->loader->load()['readmeChangelog'], 'Readme changelog updates are opt-in like in wp-release, also when the readme has a changelog section.' );
 	}
 
 	public function test_inference_needs_a_name_for_a_composer_version(): void {
 		file_put_contents( $this->root . '/composer.json', "{\"version\":\"1.2.3\"}\n" );
 
 		$this->expectException( Release_Exception::class );
-		$this->expectExceptionMessage( 'Add a name to composer.json' );
+		$this->expectExceptionMessage( 'Pass --project-name NAME, add a name to composer.json' );
 
 		$this->loader->load();
+	}
+
+	public function test_project_name_names_an_inferred_root_package(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"version\":\"1.2.3\"}\n" );
+
+		$config = ( new Project_Config( new Project_Files( $this->root ), [ 'projectName' => 'example' ] ) )->load();
+
+		$this->assertSame( 'example', $config['packages'][0]['id'], 'The project name is the identifier of an inferred root package without a manifest name.' );
+	}
+
+	public function test_tag_format_replaces_the_configured_formats(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+
+		$config = ( new Project_Config( new Project_Files( $this->root ), [ 'tagFormat' => '{name}@{version}' ] ) )->load();
+
+		$this->assertSame( '{name}@{version}', $config['tagFormat'], 'The tag format replaces the repository tag format.' );
+		$this->assertNull( $config['packages'][0]['tagFormat'], 'The tag format replaces the group tag formats too, so every package uses it.' );
+	}
+
+	public function test_tag_format_needs_a_version_placeholder(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+
+		$this->expectException( Release_Exception::class );
+		$this->expectExceptionMessage( '--tag-format must contain {version}' );
+
+		( new Project_Config( new Project_Files( $this->root ), [ 'tagFormat' => 'release' ] ) )->load();
+	}
+
+	public function test_config_path_selects_another_file(): void {
+		mkdir( $this->root . '/config' );
+		$this->write_config( 'config/release.php', "<?php\nreturn [ 'changesets' => 'notes', 'packages' => [ [ 'glob' => '.', 'id' => 'example', 'version' => [ 'from' => [ 'kind' => 'git-tag' ], 'to' => [] ] ] ] ];\n" );
+
+		$loader = new Project_Config( new Project_Files( $this->root ), [ 'config' => $this->root . '/config/release.php' ] );
+
+		$this->assertTrue( $loader->has_config(), 'A selected config file counts as the configuration.' );
+		$this->assertSame( 'notes', $loader->load()['changesets'], 'The selected config file is loaded instead of changesets.config.php.' );
+	}
+
+	public function test_missing_config_path_fails(): void {
+		$this->expectException( Release_Exception::class );
+		$this->expectExceptionMessage( 'PHP Changesets config not found' );
+
+		( new Project_Config( new Project_Files( $this->root ), [ 'config' => $this->root . '/missing.php' ] ) )->load();
 	}
 
 	public function test_inference_picks_a_tag_only_source_without_manifest_version(): void {

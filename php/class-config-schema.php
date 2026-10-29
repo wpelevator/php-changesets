@@ -19,7 +19,9 @@ final class Config_Schema {
 
 	private const DEFAULT_ID_FROM = 'path';
 
-	private const TOP_LEVEL_KEYS = [ 'changesets', 'tagFormat', 'root', 'changelog', 'readmeChangelog', 'nextVersion', 'changelogEntry', 'packages' ];
+	private const DEFAULT_REMOTE = 'origin';
+
+	private const TOP_LEVEL_KEYS = [ 'changesets', 'tagFormat', 'releaseTitle', 'root', 'remote', 'baseBranch', 'changelog', 'readmeChangelog', 'nextVersion', 'changelogEntry', 'packages' ];
 
 	private const GROUP_KEYS = [ 'glob', 'exclude', 'id', 'idFrom', 'version', 'changelog', 'tagFormat' ];
 
@@ -37,6 +39,12 @@ final class Config_Schema {
 
 	private const TAG_RELATIVE_DESCRIPTOR_KINDS = [ 'composer-json', 'wordpress-stable-tag' ];
 
+	private Semver $semver;
+
+	public function __construct( ?Semver $semver = null ) {
+		$this->semver = $semver ?? new Semver();
+	}
+
 	/**
 	 * Validate a workspace configuration and return its canonical shape.
 	 *
@@ -44,7 +52,7 @@ final class Config_Schema {
 	 * this method, so it reports every malformed setting with the key path
 	 * that carries it.
 	 *
-	 * @return array{changesets: string, tagFormat: string, root: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
+	 * @return array{changesets: string, tagFormat: string, releaseTitle: string|callable|null, root: string|null, remote: string, baseBranch: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
 	 */
 	public function define( array $config ): array {
 		$unknown = array_diff_key( $config, array_flip( self::TOP_LEVEL_KEYS ) );
@@ -77,10 +85,28 @@ final class Config_Schema {
 			throw new Release_Exception( 'Configuration key tagFormat must contain {version} exactly once.' );
 		}
 
+		$release_title = $config['releaseTitle'] ?? null;
+
+		if ( null !== $release_title && ! is_callable( $release_title ) && ! $this->is_release_title( $release_title ) ) {
+			throw new Release_Exception( 'Configuration key releaseTitle must be a callable, or a template with a {name}, {path}, {version} or {tag} placeholder.' );
+		}
+
 		$root = $config['root'] ?? null;
 
 		if ( null !== $root && ! $this->is_relative_path( $root ) ) {
 			throw new Release_Exception( 'Configuration key root must be a non-empty relative path or null.' );
+		}
+
+		$remote = $config['remote'] ?? self::DEFAULT_REMOTE;
+
+		if ( ! is_string( $remote ) || '' === trim( $remote ) ) {
+			throw new Release_Exception( 'Configuration key remote must be a non-empty string.' );
+		}
+
+		$base_branch = $config['baseBranch'] ?? null;
+
+		if ( null !== $base_branch && ( ! is_string( $base_branch ) || '' === trim( $base_branch ) ) ) {
+			throw new Release_Exception( 'Configuration key baseBranch must be a non-empty string or null.' );
 		}
 
 		$changelog = $config['changelog'] ?? self::DEFAULT_CHANGELOG;
@@ -110,7 +136,10 @@ final class Config_Schema {
 		return [
 			'changesets' => $changesets,
 			'tagFormat' => $tag_format,
+			'releaseTitle' => $release_title,
 			'root' => $root,
+			'remote' => $remote,
+			'baseBranch' => $base_branch,
 			'changelog' => $changelog,
 			'readmeChangelog' => $readme_changelog,
 			'nextVersion' => $next_version,
@@ -265,15 +294,22 @@ final class Config_Schema {
 		}
 
 		$initial_version = $descriptor['initialVersion'] ?? null;
-		$semver = new Semver();
 
-		if ( null !== $initial_version && ( ! is_string( $initial_version ) || ! $semver->is_valid( $initial_version ) || $semver->is_pre_release( $initial_version ) ) ) {
+		if ( null !== $initial_version && ( ! is_string( $initial_version ) || ! $this->semver->is_valid( $initial_version ) || $this->semver->is_pre_release( $initial_version ) ) ) {
 			throw new Release_Exception( 'Configuration key ' . $location . '.initialVersion must be a stable version.' );
 		}
 	}
 
 	private function is_relative_path( $value ): bool {
 		return is_string( $value ) && '' !== $value && 0 !== strpos( $value, '/' ) && false === strpos( $value, "\0" );
+	}
+
+	/**
+	 * Whether a value is a release title template with a placeholder, since
+	 * a title without one would name every release alike.
+	 */
+	public function is_release_title( $value ): bool {
+		return is_string( $value ) && 1 === preg_match( '/\{(?:name|path|version|tag)\}/', $value );
 	}
 
 	private function has_version_placeholder( $value ): bool {

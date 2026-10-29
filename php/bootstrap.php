@@ -1,6 +1,9 @@
 <?php
 
 require_once __DIR__ . '/class-release-exception.php';
+require_once __DIR__ . '/class-git-exception.php';
+require_once __DIR__ . '/class-git.php';
+require_once __DIR__ . '/class-logger.php';
 require_once __DIR__ . '/class-semver.php';
 require_once __DIR__ . '/class-tag-format.php';
 require_once __DIR__ . '/class-config-schema.php';

@@ -3,7 +3,8 @@
 namespace WPElevator\PHP_Changesets;
 
 /**
- * Provide the standalone changesets command-line interface.
+ * Provide the standalone changeset command-line interface, with the commands
+ * and options of the wp-release `changeset-*` commands.
  */
 final class Cli {
 
@@ -14,50 +15,86 @@ final class Cli {
 	 */
 	private array $scaffold_functions = [];
 
+	private Git $diff_git;
+
+	private Logger $logger;
+
+	/**
+	 * Whether the command may ask in a terminal: never with --json or
+	 * --github-output, like wp-release.
+	 */
+	private bool $interactive = false;
+
+	/**
+	 * @param Git|null $diff_git Git runner of the dry-run diffs, in the temporary directory.
+	 */
+	public function __construct( ?Git $diff_git = null ) {
+		$this->diff_git = $diff_git ?? new Git( sys_get_temp_dir() );
+		$this->logger = new Logger();
+	}
+
+	/**
+	 * Run a command and return its exit code, like wp-release: 0 for success,
+	 * 1 for an unexpected failure like a failed git command, and 2 for
+	 * invalid options, failed release checks or missing changesets.
+	 */
 	public function run( array $argv ): int {
-		try {
-			$command = $argv[1] ?? 'help';
+		$command = $argv[1] ?? 'help';
 
-			if ( in_array( $command, [ 'help', '--help', '-h' ], true ) ) {
-				fwrite( STDOUT, $this->help() );
-
-				return 0;
-			}
-
-			$options = $this->options( array_slice( $argv, 2 ) );
-
-			if ( isset( $options['help'] ) ) {
-				fwrite( STDOUT, $this->help() );
-
-				return 0;
-			}
-
-			$this->validate_options( $command, $options );
-
-			$files = new Project_Files( $options['root'] ?? getcwd() );
-
-			if ( 'init' === $command ) {
-				$this->init( $files );
-			} elseif ( 'add' === $command ) {
-				$this->add( $files, $options );
-			} elseif ( 'recover' === $command ) {
-				$transaction = new Release_Transaction( $files );
-				$recovered = $transaction->recover();
-				fwrite( STDOUT, $recovered ? "Recovered the release transaction.\n" : "No release transaction needs recovery.\n" );
-			} elseif ( 'status' === $command || 'version' === $command ) {
-				$this->release( $files, $command, $options );
-			} elseif ( 'tags' === $command ) {
-				$this->tags( $files, $options );
-			} else {
-				throw new Release_Exception( "Unknown command: {$command}." );
-			}
+		if ( in_array( $command, [ 'help', '--help', '-h' ], true ) ) {
+			fwrite( STDOUT, $this->help() );
 
 			return 0;
-		} catch ( Release_Exception $error ) {
-			fwrite( STDERR, $error->getMessage() . "\n" );
-
-			return 2;
 		}
+
+		try {
+			$options = $this->options( array_slice( $argv, 2 ) );
+			$exit = $this->run_command( $command, $options );
+		} catch ( Release_Exception $error ) {
+			$this->logger->failure( $error, "changeset {$command} failed" );
+			$exit = 2;
+		} catch ( \Throwable $error ) {
+			$this->logger->failure( $error, "changeset {$command} failed" );
+			$exit = 1;
+		}
+
+		return $exit;
+	}
+
+	private function run_command( string $command, array $options ): int {
+		$exit = 0;
+
+		if ( isset( $options['help'] ) ) {
+			fwrite( STDOUT, $this->help() );
+		} else {
+			$this->logger = $this->logger( $options );
+			$this->validate_options( $command, $options );
+			$this->interactive = ! isset( $options['json'] ) && ! isset( $options['github_output'] ) && stream_isatty( STDIN );
+
+			$files = new Project_Files( $options['root'] ?? getcwd() );
+			$config_loader = new Project_Config( $files, $this->config_overrides( $options ) );
+
+			if ( 'init' === $command ) {
+				$this->init( $files, $config_loader, $options );
+			} elseif ( 'add' === $command ) {
+				$this->add( $files, $config_loader, $options );
+			} elseif ( 'recover' === $command ) {
+				$recovered = ( new Release_Transaction( $files ) )->recover();
+				$this->output(
+					$options,
+					[ 'recovered' => $recovered ],
+					$recovered ? 'Recovered the release transaction.' : 'No release transaction needs recovery.'
+				);
+			} elseif ( 'status' === $command ) {
+				$exit = $this->status( new Release_Engine( $files, $config_loader ), $options );
+			} elseif ( 'version' === $command ) {
+				$this->version( $files, new Release_Engine( $files, $config_loader ), $options );
+			} else {
+				$this->tag( new Release_Engine( $files, $config_loader ), $options );
+			}
+		}
+
+		return $exit;
 	}
 
 	private function options( array $arguments ): array {
@@ -68,6 +105,9 @@ final class Cli {
 			'--github-output' => 'github_output',
 			'--dry-run' => 'dry_run',
 			'--empty' => 'empty',
+			'--untagged' => 'untagged',
+			'--push' => 'push',
+			'--ci' => 'ci',
 		];
 		$repeatable = [
 			'--package' => 'package',
@@ -75,10 +115,20 @@ final class Cli {
 		];
 		$values = [
 			'--root' => 'root',
+			'--config' => 'config',
+			'--tag-format' => 'tag_format',
+			'--project-name' => 'project_name',
+			'--base-branch' => 'base_branch',
+			'--remote' => 'remote',
+			'--log-format' => 'log_format',
+			'--since' => 'since',
 			'--summary' => 'summary',
 			'--name' => 'name',
 			'--date' => 'date',
 			'--prerelease' => 'prerelease',
+			'--snapshot' => 'snapshot',
+			'--version' => 'version',
+			'--release-title' => 'release_title',
 		];
 
 		for ( $index = 0; $index < count( $arguments ); ++$index ) {
@@ -99,13 +149,14 @@ final class Cli {
 	}
 
 	private function validate_options( string $command, array $options ): void {
+		$global = [ 'root', 'config', 'tag_format', 'project_name', 'base_branch', 'remote', 'log_format', 'ci', 'json', 'github_output' ];
 		$allowed = [
-			'init' => [ 'root' ],
-			'add' => [ 'root', 'bump', 'summary', 'name', 'empty', 'package' ],
-			'recover' => [ 'root' ],
-			'status' => [ 'root', 'json', 'github_output' ],
-			'version' => [ 'root', 'json', 'github_output', 'dry_run', 'date', 'prerelease' ],
-			'tags' => [ 'root', 'json', 'github_output' ],
+			'init' => [],
+			'add' => [ 'bump', 'summary', 'name', 'empty', 'package', 'since' ],
+			'recover' => [],
+			'status' => [ 'since' ],
+			'version' => [ 'dry_run', 'date', 'package', 'prerelease', 'snapshot' ],
+			'tag' => [ 'dry_run', 'untagged', 'since', 'package', 'version', 'release_title', 'push' ],
 		];
 
 		if ( ! isset( $allowed[ $command ] ) ) {
@@ -113,8 +164,8 @@ final class Cli {
 		}
 
 		foreach ( array_keys( $options ) as $option ) {
-			if ( ! in_array( $option, $allowed[ $command ], true ) ) {
-				throw new Release_Exception( "Option {$option} is not valid for {$command}." );
+			if ( ! in_array( $option, array_merge( $global, $allowed[ $command ] ), true ) ) {
+				throw new Release_Exception( 'Option --' . str_replace( '_', '-', $option ) . " is not valid for {$command}." );
 			}
 		}
 
@@ -123,8 +174,85 @@ final class Cli {
 		}
 	}
 
-	private function init( Project_Files $files ): void {
-		$config_loader = new Project_Config( $files );
+	/**
+	 * The logger of the --log-format, or --ci for github, which is also the
+	 * default in GitHub Actions.
+	 */
+	private function logger( array $options ): Logger {
+		$default = isset( $options['ci'] ) || 'true' === getenv( 'GITHUB_ACTIONS' ) ? 'github' : 'text';
+		$format = $options['log_format'] ?? $default;
+
+		if ( ! in_array( $format, Logger::FORMATS, true ) ) {
+			throw new Release_Exception( "Unknown log format: {$format}; expected text or github." );
+		}
+
+		$summary = (string) getenv( 'GITHUB_STEP_SUMMARY' );
+		$workspace = (string) getenv( 'GITHUB_WORKSPACE' );
+
+		return new Logger( $format, '' === $workspace ? (string) getcwd() : $workspace, '' === $summary ? null : $summary );
+	}
+
+	/**
+	 * The global options that replace configured settings for one command,
+	 * with the --config file relative to the current directory.
+	 *
+	 * @return array{config?: string, tagFormat?: string, projectName?: string, remote?: string, baseBranch?: string}
+	 */
+	private function config_overrides( array $options ): array {
+		$overrides = [];
+		$names = [
+			'config' => 'config',
+			'tag_format' => 'tagFormat',
+			'project_name' => 'projectName',
+			'remote' => 'remote',
+			'base_branch' => 'baseBranch',
+		];
+
+		foreach ( array_intersect_key( $names, $options ) as $option => $name ) {
+			$overrides[ $name ] = $options[ $option ];
+		}
+
+		if ( isset( $overrides['config'] ) && '/' !== substr( $overrides['config'], 0, 1 ) ) {
+			$overrides['config'] = getcwd() . '/' . $overrides['config'];
+		}
+
+		return $overrides;
+	}
+
+	/**
+	 * Print a result as JSON with --json, or the text, and set it as GitHub
+	 * Actions step outputs with --github-output.
+	 *
+	 * @param array<string, mixed> $result
+	 */
+	private function output( array $options, array $result, string $text ): void {
+		$this->github_output( $options, $result );
+
+		if ( $options['json'] ?? false ) {
+			fwrite( STDOUT, $this->json( $result, JSON_PRETTY_PRINT ) . "\n" );
+		} elseif ( '' !== $text ) {
+			$this->logger->info( $text );
+		}
+	}
+
+	/**
+	 * Encode a result, keeping maps that may be empty as JSON objects.
+	 *
+	 * @param array<string, mixed> $result
+	 */
+	private function json( array $result, int $flags = 0 ): string {
+		if ( isset( $result['changedPackageFiles'] ) ) {
+			$result['changedPackageFiles'] = (object) $result['changedPackageFiles'];
+		}
+
+		if ( isset( $result['packages'] ) && [] === $result['packages'] && isset( $result['file'] ) ) {
+			$result['packages'] = (object) [];
+		}
+
+		return (string) json_encode( $result, $flags | JSON_UNESCAPED_SLASHES );
+	}
+
+	private function init( Project_Files $files, Project_Config $config_loader, array $options ): void {
 		$config = $config_loader->load();
 		$directory = $files->resolve( $config['changesets'] );
 
@@ -132,23 +260,39 @@ final class Cli {
 			throw new Release_Exception( 'Could not create changeset directory.' );
 		}
 
-		if ( $config_loader->has_config() ) {
-			fwrite( STDOUT, "Initialized PHP Changesets.\n" );
+		$created = ! $config_loader->has_config();
+		$file = $config_loader->config_file();
 
-			return;
+		if ( $created ) {
+			$contents = $this->scaffold( $config );
+
+			if ( strlen( $contents ) !== file_put_contents( $file, $contents, LOCK_EX ) ) {
+				throw new Release_Exception( 'Could not write changesets.config.php.' );
+			}
 		}
 
-		$file = $files->get_root() . '/changesets.config.php';
-		$contents = $this->scaffold( $config );
+		$packages = array_column( ( new Package_Discovery( $files ) )->discover( $config ), 'name' );
+		$name = 1 === count( $packages ) ? $packages[0] : $config['changesets'];
 
-		if ( strlen( $contents ) !== file_put_contents( $file, $contents, LOCK_EX ) ) {
-			throw new Release_Exception( 'Could not write changesets.config.php.' );
-		}
+		$this->output(
+			$options,
+			[
+				'config' => $this->relative( $files, $file ),
+				'created' => $created,
+				'changesets' => $config['changesets'],
+				'packages' => $packages,
+			],
+			$created ? "Initialized PHP Changesets for {$name}." : 'Initialized PHP Changesets.'
+		);
+	}
 
-		$packages = ( new Package_Discovery( $files ) )->discover( $config );
-		$name = 1 === count( $packages ) ? $packages[0]['name'] : $config['changesets'];
+	/**
+	 * A path relative to the project root, or as it is outside the root.
+	 */
+	private function relative( Project_Files $files, string $path ): string {
+		$root = $files->get_root() . '/';
 
-		fwrite( STDOUT, "Initialized PHP Changesets for {$name}.\n" );
+		return 0 === strpos( $path, $root ) ? substr( $path, strlen( $root ) ) : $path;
 	}
 
 	/**
@@ -176,7 +320,7 @@ final class Cli {
 			'<?php',
 			'',
 			'/**',
-			' * PHP Changesets release configuration scaffolded by changesets init.',
+			' * PHP Changesets release configuration scaffolded by changeset init.',
 			' */',
 			'',
 		];
@@ -187,6 +331,9 @@ final class Cli {
 
 		if ( $config['readmeChangelog'] ) {
 			$settings[] = "\t'readmeChangelog' => true,";
+		} elseif ( $this->has_readme_target( $config ) ) {
+			$settings[] = "\t// Add the release notes to the == Changelog == section of the plugin readme:";
+			$settings[] = "\t// 'readmeChangelog' => true,";
 		}
 
 		foreach ( array_keys( $this->scaffold_functions ) as $function ) {
@@ -210,6 +357,20 @@ final class Cli {
 				]
 			)
 		) . "\n";
+	}
+
+	/**
+	 * Whether a package group updates a readme Stable tag, so that the
+	 * scaffold can offer the opt-in readme changelog.
+	 */
+	private function has_readme_target( array $config ): bool {
+		$kinds = [];
+
+		foreach ( $config['packages'] as $group ) {
+			$kinds = array_merge( $kinds, array_column( $group['version']['to'], 'kind' ) );
+		}
+
+		return in_array( 'wordpress-stable-tag', $kinds, true );
 	}
 
 	/**
@@ -341,8 +502,8 @@ final class Cli {
 		return [ 'NULL' ] === $args ? [] : str_replace( 'NULL', 'null', $args );
 	}
 
-	private function add( Project_Files $files, array $options ): void {
-		$config = ( new Project_Config( $files ) )->load();
+	private function add( Project_Files $files, Project_Config $config_loader, array $options ): void {
+		$config = $config_loader->load();
 		$packages = ( new Package_Discovery( $files ) )->discover( $config );
 		$empty = $options['empty'] ?? false;
 
@@ -350,7 +511,12 @@ final class Cli {
 		$summary = '';
 
 		if ( ! $empty ) {
-			$selected = $this->selected_packages( $packages, $options['package'] ?? [] );
+			$engine = new Release_Engine( $files, $config_loader );
+			// Like wp-release, a sole package is released without comparing changes,
+			// unless --since asks for them.
+			$since = $options['since'] ?? ( 1 < count( $packages ) ? $engine->base_ref() : null );
+			$changed = null === $since ? null : $engine->status( $since, true )['missingChangesets'];
+			$selected = $this->selected_packages( $files, $packages, $options['package'] ?? [], $changed, $since, $options );
 			$bumps = $this->package_bumps( $selected, $options['bump'] ?? [] );
 			$summary = $options['summary'] ?? $this->prompt( 'Summary: ' );
 		}
@@ -379,19 +545,7 @@ final class Cli {
 			throw new Release_Exception( "Changeset already exists: {$name}.md." );
 		}
 
-		$frontmatter = '';
-
-		if ( ! $empty ) {
-			$lines = [];
-
-			foreach ( $bumps as $name => $bump ) {
-				$lines[] = json_encode( (string) $name, JSON_UNESCAPED_SLASHES ) . ': ' . $bump;
-			}
-
-			$frontmatter = implode( "\n", $lines ) . "\n";
-		}
-
-		$contents = "---\n" . $frontmatter . "---\n\n" . trim( $summary ) . "\n";
+		$contents = ( new Changeset_Reader() )->format( $bumps, $summary );
 		$written = fwrite( $handle, $contents );
 		fclose( $handle );
 
@@ -401,7 +555,15 @@ final class Cli {
 			throw new Release_Exception( 'Could not write changeset.' );
 		}
 
-		fwrite( STDOUT, "Created {$file}.\n" );
+		$this->output(
+			$options,
+			[
+				'file' => $this->relative( $files, $file ),
+				'packages' => $bumps,
+				'summary' => trim( $summary ),
+			],
+			"Created {$file}."
+		);
 	}
 
 	/**
@@ -443,112 +605,129 @@ final class Cli {
 	/**
 	 * Select the packages a new changeset releases, rejecting unknown names.
 	 *
-	 * Single-package configurations select their only package. With several
-	 * packages, selection repeats the given names, prompts in a terminal, and
-	 * throws without one.
+	 * Given names are used as they are. Without them, a single package is
+	 * selected, unless --since compares the changes; with --since, a single
+	 * --bump or a run without a terminal selects the changed packages without
+	 * a changeset, like wp-release. Otherwise a terminal prompt asks, where
+	 * Enter selects the changed packages, or every package without --since.
 	 *
 	 * @param array<int, array{name: string, path: string, directory: string, group: int}> $packages
-	 * @param string[] $wanted Selected package names.
+	 * @param string[]      $wanted  Selected package names.
+	 * @param string[]|null $changed Changed packages without a changeset since the base ref.
+	 * @param string|null   $since   Base ref of the changes, from --since or the config.
 	 * @return array<int, array{name: string, path: string, directory: string, group: int}>
 	 */
-	private function selected_packages( array $packages, array $wanted ): array {
-		$by_name = [];
+	private function selected_packages( Project_Files $files, array $packages, array $wanted, ?array $changed, ?string $since, array $options ): array {
+		if ( [] === $wanted && null === $changed && 1 === count( $packages ) ) {
+			$wanted = array_column( $packages, 'name' );
+		} elseif ( [] === $wanted && null !== $changed && ( ! $this->interactive || 1 === count( $options['bump'] ?? [] ) ) ) {
+			if ( [] === $changed ) {
+				throw new Release_Exception( "No package changed since {$since} without a changeset. Pass --package <name> to choose the packages." );
+			}
 
-		foreach ( $packages as $package ) {
-			$by_name[ $package['name'] ] = $package;
-		}
+			$wanted = $changed;
+		} elseif ( [] === $wanted ) {
+			if ( ! $this->interactive ) {
+				throw new Release_Exception( sprintf( 'The configuration discovers %d packages; select them with --package NAME, or the changed ones with --since REF.', count( $packages ) ) );
+			}
 
-		if ( [] === $wanted && 1 === count( $packages ) ) {
-			return $packages;
+			$wanted = $this->prompt_packages( $packages, $changed );
 		}
 
 		if ( [] === $wanted ) {
-			if ( ! stream_isatty( STDIN ) ) {
-				throw new Release_Exception( sprintf( 'The configuration discovers %d packages; select them with --package NAME.', count( $packages ) ) );
-			}
-
-			$wanted = $this->prompt_packages( $packages );
+			throw new Release_Exception( 'Select at least one package, or pass --empty for no release.' );
 		}
 
-		return $this->collect_packages( $by_name, $wanted );
+		$names = ( new Package_Discovery( $files ) )->names( $packages, $wanted );
+
+		return array_map(
+			static fn( string $name ): array => array_values( array_filter( $packages, static fn( array $package ): bool => $name === $package['name'] ) )[0],
+			$names
+		);
 	}
 
 	/**
-	 * Prompt for the affected packages of one changeset in a terminal.
+	 * Prompt for the affected packages of one changeset in a terminal,
+	 * marking the changed ones without a changeset.
 	 *
 	 * @param array<int, array{name: string, path: string, directory: string, group: int}> $packages
+	 * @param string[]|null $changed
 	 * @return string[]
 	 */
-	private function prompt_packages( array $packages ): array {
-		fwrite( STDOUT, "Packages affected by this changeset, comma-separated (empty for all):\n" );
+	private function prompt_packages( array $packages, ?array $changed ): array {
+		fwrite( STDOUT, null === $changed ? "Packages affected by this changeset, comma-separated (empty for all):\n" : "Packages affected by this changeset, comma-separated (empty for the changed ones):\n" );
 
 		foreach ( $packages as $package ) {
-			fwrite( STDOUT, '  ' . $package['name'] . "\n" );
+			$mark = in_array( $package['name'], $changed ?? [], true ) ? ' (changed)' : '';
+			fwrite( STDOUT, '  ' . $package['name'] . $mark . "\n" );
 		}
 
 		$answer = $this->prompt( 'Packages: ' );
 
 		if ( '' === $answer ) {
-			return array_column( $packages, 'name' );
+			return $changed ?? array_column( $packages, 'name' );
 		}
 
 		return array_values( array_filter( array_map( 'trim', explode( ',', $answer ) ), 'strlen' ) );
 	}
 
 	/**
-	 * Resolve selected package identifiers or paths to discovered packages,
-	 * keeping selection order and rejecting unknown or repeated packages.
-	 *
-	 * @param array<string, array{name: string, path: string, directory: string, group: int}> $by_name
-	 * @param string[] $wanted Package identifiers, or their paths under the configured root.
-	 * @return array<int, array{name: string, path: string, directory: string, group: int}>
+	 * Show the pending releases and, with --since, fail with exit code 2 for
+	 * each changed package without a changeset, like wp-release
+	 * `changeset-status`.
 	 */
-	private function collect_packages( array $by_name, array $wanted ): array {
-		$selected = [];
+	private function status( Release_Engine $engine, array $options ): int {
+		$result = $engine->status( $options['since'] ?? null );
+		$rows = [];
 
-		foreach ( $wanted as $identifier ) {
-			$package = $this->find_package( $by_name, $identifier );
-
-			if ( null === $package ) {
-				throw new Release_Exception( "Unknown package: {$identifier}." );
-			}
-
-			if ( isset( $selected[ $package['name'] ] ) ) {
-				throw new Release_Exception( "Package {$package['name']} is selected more than once." );
-			}
-
-			$selected[ $package['name'] ] = $package;
+		foreach ( $result['changedPackages'] as $name ) {
+			$rows[] = '| ' . $name . ' | ' . $this->package_status( $result, $name ) . ' |';
 		}
 
-		return array_values( $selected );
+		$this->logger->summary( implode( "\n", array_merge( [ '### Changeset status', '', '| Package | Status |', '| --- | --- |' ], $rows ) ) );
+		$this->output( $options, $result, $this->releases_text( $result['releases'] ) );
+
+		foreach ( $result['missingChangesets'] as $name ) {
+			$file = $result['changedPackageFiles'][ $name ][0] ?? null;
+			$annotation = [ 'title' => 'Missing changeset' ];
+
+			if ( null !== $file ) {
+				$annotation['file'] = $engine->absolute_path( $file );
+			}
+
+			$this->logger->error( "Changed package \"{$name}\" has no changeset.", $annotation );
+		}
+
+		return [] === $result['missingChangesets'] ? 0 : 2;
+	}
+
+	private function package_status( array $result, string $name ): string {
+		$status = 'no release requested';
+
+		if ( in_array( $name, $result['missingChangesets'], true ) ) {
+			$status = 'missing changeset';
+		} elseif ( in_array( $name, array_column( array_filter( $result['releases'], static fn( array $release ): bool => null !== $release['bump'] ), 'package' ), true ) ) {
+			$status = 'changeset found';
+		}
+
+		return $status;
 	}
 
 	/**
-	 * Find a package by its identifier, or by its path under the configured
-	 * root like `plugins/alpha/`, as wp-release `findPackage()` does.
-	 *
-	 * @param array<string, array{name: string, path: string, directory: string, group: int}> $by_name
-	 * @return array{name: string, path: string, directory: string, group: int}|null
+	 * Preview or apply the pending releases.
 	 */
-	private function find_package( array $by_name, string $identifier ): ?array {
-		$path = rtrim( (string) preg_replace( '#^\./#', '', str_replace( '\\', '/', $identifier ) ), '/' );
-		$found = $by_name[ $identifier ] ?? null;
-
-		foreach ( $by_name as $package ) {
-			if ( null === $found && $package['path'] === $path ) {
-				$found = $package;
-			}
-		}
-
-		return $found;
-	}
-
-	private function release( Project_Files $files, string $command, array $options ): void {
-		$engine = new Release_Engine( $files );
-		$plan = $engine->plan( $options['date'] ?? null, $options['prerelease'] ?? null );
+	private function version( Project_Files $files, Release_Engine $engine, array $options ): void {
+		$plan = $engine->plan(
+			[
+				'date' => $options['date'] ?? null,
+				'prerelease' => $options['prerelease'] ?? null,
+				'snapshot' => $options['snapshot'] ?? null,
+				'packages' => $options['package'] ?? [],
+			]
+		);
 		$dry_run = $options['dry_run'] ?? false;
 
-		if ( 'version' === $command && ! $dry_run ) {
+		if ( ! $dry_run ) {
 			$engine->apply( $plan );
 		}
 
@@ -557,47 +736,83 @@ final class Cli {
 			'releases' => $plan['releases'],
 		];
 
-		if ( 'version' === $command && $dry_run ) {
+		if ( $dry_run ) {
 			$result['diff'] = $this->diff( $files->get_root(), $plan['sections'] );
 		}
 
-		$this->github_output( $options, $result );
-
-		if ( $options['json'] ?? false ) {
-			fwrite( STDOUT, json_encode( $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n" );
-
-			return;
-		}
+		$rows = [];
 
 		foreach ( $plan['releases'] as $release ) {
-			if ( null === $release['bump'] ) {
-				fwrite( STDOUT, "No pending release for {$release['package']} ({$release['currentVersion']}).\n" );
-			} else {
-				fwrite( STDOUT, "{$release['package']}: {$release['currentVersion']} -> {$release['nextVersion']} ({$release['bump']}); tag {$release['tag']}.\n" );
+			if ( null !== $release['bump'] ) {
+				$rows[] = "| {$release['package']} | {$release['currentVersion']} → {$release['nextVersion']} | {$release['bump']} |";
 			}
 		}
 
-		if ( 'version' === $command ) {
-			fwrite( STDOUT, $result['diff'] ?? "Applied release plan.\n" );
-		}
+		$this->logger->summary( implode( "\n", array_merge( [ $dry_run ? '### Release plan (dry run)' : '### Released versions', '', '| Package | Version | Bump |', '| --- | --- | --- |' ], $rows ) ) );
+		$this->output( $options, $result, $this->releases_text( $plan['releases'] ) . "\n" . rtrim( $result['diff'] ?? 'Applied release plan.' ) );
 	}
 
 	/**
-	 * Print the release tags that the current versions still need, one per
-	 * line, so that a workflow can create them after merging a release.
+	 * One line per package release, or that it has nothing pending.
 	 */
-	private function tags( Project_Files $files, array $options ): void {
-		$result = ( new Release_Engine( $files ) )->untagged();
+	private function releases_text( array $releases ): string {
+		$lines = [];
 
-		$this->github_output( $options, $result );
-
-		if ( $options['json'] ?? false ) {
-			fwrite( STDOUT, json_encode( $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n" );
-		} else {
-			foreach ( $result['tags'] as $tag ) {
-				fwrite( STDOUT, $tag['tag'] . "\n" );
-			}
+		foreach ( $releases as $release ) {
+			$lines[] = null === $release['bump']
+				? "No pending release for {$release['package']} ({$release['currentVersion']})."
+				: "{$release['package']}: {$release['currentVersion']} -> {$release['nextVersion']} ({$release['bump']}); tag {$release['tag']}.";
 		}
+
+		return implode( "\n", $lines );
+	}
+
+	/**
+	 * Create the missing release tags, like wp-release `changeset-tag`, or
+	 * list them with --dry-run or --untagged.
+	 */
+	private function tag( Release_Engine $engine, array $options ): void {
+		$result = $engine->tag(
+			[
+				'dryRun' => $options['dry_run'] ?? false,
+				'untagged' => $options['untagged'] ?? false,
+				'since' => $options['since'] ?? null,
+				'packages' => $options['package'] ?? [],
+				'version' => $options['version'] ?? null,
+				'releaseTitle' => $options['release_title'] ?? null,
+				'push' => $options['push'] ?? false,
+			]
+		);
+		$summary = [ '### Release tags', '' ];
+		$lines = [];
+
+		foreach ( $result['tags'] as $tag ) {
+			$status = $this->tag_status( $tag, $options );
+			$previous = isset( $tag['previousTag'] ) ? " after `{$tag['previousTag']}`" : '';
+			$summary[] = "- `{$tag['tag']}` ({$tag['title']}){$previous}: {$status}";
+			$summary[] = '';
+			$summary[] = '  <details><summary>Release notes</summary>';
+			$summary[] = '';
+			$summary[] = '  ' . str_replace( "\n", "\n  ", $tag['notes'] );
+			$summary[] = '';
+			$summary[] = '  </details>';
+			$lines[] = isset( $options['untagged'] ) ? $tag['tag'] : "{$tag['tag']}: {$status}.";
+		}
+
+		$this->logger->summary( [] === $result['tags'] ? "### Release tags\n\nNo release needs a tag." : implode( "\n", $summary ) );
+		$this->output( $options, $result, implode( "\n", $lines ) );
+	}
+
+	private function tag_status( array $tag, array $options ): string {
+		$status = 'exists';
+
+		if ( $tag['created'] ) {
+			$status = isset( $options['push'] ) ? 'created and pushed' : 'created';
+		} elseif ( ! $tag['exists'] ) {
+			$status = 'missing';
+		}
+
+		return $status;
 	}
 
 	/**
@@ -618,7 +833,7 @@ final class Cli {
 			}
 
 			$delimiter = 'ghadelimiter_' . bin2hex( random_bytes( 16 ) );
-			$output = 'result=' . json_encode( $result, JSON_UNESCAPED_SLASHES ) . "\n";
+			$output = 'result=' . $this->json( $result ) . "\n";
 
 			foreach ( $result as $name => $value ) {
 				if ( is_scalar( $value ) ) {
@@ -693,33 +908,7 @@ final class Cli {
 			// The diff inputs are absolute temporary files and the index comparison
 			// needs no repository, so the subprocess runs away from any enclosing
 			// git checkout that may be unreadable, like a linked worktree .git file.
-			$process = proc_open(
-				[ 'git', 'diff', '--no-index', '--no-ext-diff', '--no-color', '--unified=3', '--', $old_file, $new_file ],
-				[
-					0 => [ 'pipe', 'r' ],
-					1 => [ 'pipe', 'w' ],
-					2 => [ 'pipe', 'w' ],
-				],
-				$pipes,
-				sys_get_temp_dir()
-			);
-
-			if ( ! is_resource( $process ) ) {
-				throw new Release_Exception( 'Could not run git diff.' );
-			}
-
-			fclose( $pipes[0] );
-			$diff = stream_get_contents( $pipes[1] );
-			$error = stream_get_contents( $pipes[2] );
-			fclose( $pipes[1] );
-			fclose( $pipes[2] );
-
-			$exit = proc_close( $process );
-
-			if ( 0 !== $exit && 1 !== $exit ) {
-				throw new Release_Exception( 'Could not generate preview diff: ' . trim( $error ) );
-			}
-
+			$diff = $this->diff_git->run( [ 'diff', '--no-index', '--no-ext-diff', '--no-color', '--unified=3', '--', $old_file, $new_file ], [ 0, 1 ] );
 			$hunk = strpos( $diff, '@@ ' );
 			$edit_diff = '';
 
@@ -742,7 +931,7 @@ final class Cli {
 	}
 
 	private function prompt( string $label ): string {
-		if ( ! stream_isatty( STDIN ) ) {
+		if ( ! $this->interactive ) {
 			throw new Release_Exception( 'Use --bump and --summary without a terminal.' );
 		}
 
@@ -752,19 +941,32 @@ final class Cli {
 	}
 
 	private function help(): string {
-		return "Usage: changesets <command> [options]\n\n"
+		return "Usage: changeset <command> [options]\n\n"
 			. "Commands:\n"
 			. "  init       Create the changeset directory and scaffold changesets.config.php\n"
-			. "  add        Add a changeset (--bump patch|minor|major --summary TEXT, or --empty);\n"
-			. "             select packages with --package NAME|PATH, or answer the prompt when several\n"
-			. "             exist; repeat --bump after each --package for different bumps\n"
-			. "  status     Show the pending release plan (--json)\n"
-			. "  version    Preview or apply a release (--dry-run, --json, --date YYYY-MM-DD,\n"
-			. "             --prerelease ID)\n"
-			. "  tags       List the release tags that the current versions still need (--json),\n"
-			. "             for a workflow to create after merging a release\n"
+			. "  add        Add a changeset: --package NAME|PATH --bump BUMP pairs (repeatable), a\n"
+			. "             single --bump for the changed packages, or --empty; --summary TEXT,\n"
+			. "             --since REF, --name NAME. Asks in a terminal without them\n"
+			. "  status     Show the pending releases; with --since REF, or the configured base\n"
+			. "             branch, exit with 2 when a changed package has no changeset\n"
+			. "  version    Apply the pending releases: --dry-run, --date YYYY-MM-DD, --package\n"
+			. "             NAME|PATH (repeatable), --prerelease ID or --snapshot ID\n"
+			. "  tag        Create the missing release tags: --dry-run, --untagged, --since REF,\n"
+			. "             --package NAME|PATH (repeatable), --version VERSION,\n"
+			. "             --release-title TEMPLATE, --push\n"
 			. "  recover    Restore files after an interrupted release\n\n"
-			. "Global option: --root DIRECTORY (default: current directory)\n"
-			. "status, version and tags: --github-output sets the result as GitHub Actions step outputs\n";
+			. "Global options:\n"
+			. "  --root DIRECTORY        Project root (default: current directory)\n"
+			. "  --config PATH           Config file instead of changesets.config.php\n"
+			. "  --tag-format FORMAT     Replace the configured tag formats, like {name}@{version}\n"
+			. "  --project-name NAME     Identifier of an inferred root package\n"
+			. "  --base-branch BRANCH    Branch on the remote that status and add compare with\n"
+			. "  --remote NAME           Git remote of the base branch and tag pushes (default: origin)\n"
+			. "  --json                  Print the result as JSON\n"
+			. "  --github-output         Set the result as GitHub Actions step outputs\n"
+			. "  --log-format text|github  Log as text or GitHub Actions annotations and job summaries\n"
+			. "  --ci                    Shorthand for --log-format github, the default in GitHub Actions\n\n"
+			. "Exit codes: 0 success, 1 unexpected failure like a failed git command, 2 invalid\n"
+			. "options, failed release checks or missing changesets.\n";
 	}
 }

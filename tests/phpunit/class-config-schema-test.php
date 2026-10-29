@@ -87,6 +87,9 @@ final class Config_Schema_Test extends TestCase {
 		$this->assertSame( 'CHANGELOG.md', $config['changelog'], 'Omitted changelogs default to CHANGELOG.md.' );
 		$this->assertNull( $config['nextVersion'], 'Omitted next-version hooks stay disabled.' );
 		$this->assertNull( $config['changelogEntry'], 'Omitted changelog-entry hooks stay disabled.' );
+		$this->assertNull( $config['releaseTitle'], 'Omitted release titles default to name@version.' );
+		$this->assertSame( 'origin', $config['remote'], 'Omitted remotes default to origin, like wp-release.' );
+		$this->assertNull( $config['baseBranch'], 'Without a base branch, status compares only with --since.' );
 		$this->assertSame( 'plugins/*', $config['packages'][0]['glob'], 'Groups keep their configured glob.' );
 		$this->assertSame( [], $config['packages'][0]['exclude'], 'Omitted group exclusions stay empty.' );
 		$this->assertSame( 'path', $config['packages'][0]['idFrom'], 'Omitted identifiers resolve from the package path.' );
@@ -326,6 +329,27 @@ final class Config_Schema_Test extends TestCase {
 			],
 			'ifPresent',
 			'Descriptors that cannot skip missing files must not carry ifPresent.'
+		);
+	}
+
+	public function test_define_rejects_release_titles_without_placeholders(): void {
+		$this->expectException( Release_Exception::class );
+		$this->expectExceptionMessage( 'releaseTitle' );
+
+		\WPElevator\PHP_Changesets\define_config(
+			[
+				'releaseTitle' => 'Release',
+				'packages' => [
+					[
+						'glob' => '.',
+						'id' => 'example',
+						'version' => [
+							'from' => \WPElevator\PHP_Changesets\git_tag_version(),
+							'to' => [],
+						],
+					],
+				],
+			]
 		);
 	}
 

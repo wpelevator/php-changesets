@@ -96,14 +96,14 @@ final class Integration_Test extends TestCase {
 
 		$this->assertSame( 0, $installed[0], 'A consumer should install the local Composer package: ' . $installed[2] );
 
-		$bin = $this->root . '/vendor/bin/changesets';
+		$bin = $this->root . '/vendor/bin/changeset';
 
 		$this->assertFileExists( $bin, 'Composer should expose the package executable in vendor/bin.' );
 
 		$help = $this->run_command( [ PHP_BINARY, $bin, '--help' ] );
 
 		$this->assertSame( 0, $help[0], 'The Composer proxy executable should run successfully: ' . $help[2] );
-		$this->assertStringContainsString( 'changesets <command>', $help[1], 'The installed CLI should display its command help.' );
+		$this->assertStringContainsString( 'changeset <command>', $help[1], 'The installed CLI should display its command help.' );
 
 		$probe = 'require ' . var_export( $this->root . '/vendor/autoload.php', true )
 			. '; echo class_exists(' . var_export( 'WPElevator\\PHP_Changesets\\Release_Engine', true ) . ') && function_exists(' . var_export( 'WPElevator\\PHP_Changesets\\define_config', true ) . ') ? "loaded" : "missing";';
@@ -293,7 +293,7 @@ PHP
 
 		$status_error = $this->assert_cli_failure( [ 'status', '--json' ] );
 
-		$this->assertStringContainsString( 'does not match', $status_error, 'Status should detect mismatched declared version targets even without changesets.' );
+		$this->assertStringContainsString( 'expected 1.2.3', $status_error, 'Status should detect mismatched declared version targets even without changesets.' );
 
 		$this->assert_cli_success( [ 'add', '--bump', 'patch', '--summary', 'Fix.', '--name', 'fix' ] );
 
@@ -301,7 +301,7 @@ PHP
 		$config = file_get_contents( $this->root . '/changesets.config.php' );
 		$error = $this->assert_cli_failure( [ 'version', '--date', '2026-01-02' ] );
 
-		$this->assertStringContainsString( 'does not match', $error, 'The error identifies the version mismatch.' );
+		$this->assertStringContainsString( 'expected 1.2.3', $error, 'The error identifies the version mismatch.' );
 		$this->assertSame( $plugin, file_get_contents( $this->root . '/plugin.php' ), 'The earlier valid target remains unchanged.' );
 		$this->assertSame( $readme, file_get_contents( $this->root . '/readme.txt' ), 'The mismatched target remains unchanged.' );
 		$this->assertSame( $changelog, file_get_contents( $this->root . '/CHANGELOG.md' ), 'The changelog remains unchanged when preflight fails.' );
@@ -944,7 +944,11 @@ PHP
 		file_put_contents( $this->root . '/readme.txt', $readme );
 		$this->assert_cli_success( [ 'init' ] );
 
-		$this->assertStringContainsString( "'readmeChangelog' => true,", (string) file_get_contents( $this->root . '/changesets.config.php' ), 'The scaffold keeps the inferred readme changelog setting.' );
+		$config = (string) file_get_contents( $this->root . '/changesets.config.php' );
+
+		$this->assertStringContainsString( "\t// 'readmeChangelog' => true,", $config, 'The scaffold offers the opt-in readme changelog of a plugin, commented out.' );
+
+		file_put_contents( $this->root . '/changesets.config.php', str_replace( "// 'readmeChangelog'", "'readmeChangelog'", $config ) );
 
 		$this->assert_cli_success( [ 'add', '--bump', 'minor', '--summary', "Add a feature.\nWith details.", '--name', 'feature' ] );
 		$preview = json_decode( $this->assert_cli_success( [ 'version', '--dry-run', '--json', '--date', '2026-01-02' ] ), true );
@@ -960,30 +964,74 @@ PHP
 		);
 	}
 
-	public function test_tags_lists_the_tags_that_released_versions_still_need(): void {
+	public function test_tag_creates_the_missing_tags_of_released_versions(): void {
 		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+		$this->commit_all( 'Initial release' );
 		$this->git_tag( 'v1.2.3' );
 
-		$this->assertSame( '', $this->assert_cli_success( [ 'tags' ] ), 'A tagged current version needs no tag.' );
+		$this->assertSame( '', $this->assert_cli_success( [ 'tag', '--untagged' ] ), 'A tagged current version needs no tag.' );
 
 		$this->assert_cli_success( [ 'add', '--bump', 'minor', '--summary', 'Add a feature.', '--name', 'feature' ] );
 		$this->assert_cli_success( [ 'version', '--date', '2026-01-02' ] );
+		$this->commit_all( 'Release 1.3.0' );
 
-		$this->assertSame( "v1.3.0\n", $this->assert_cli_success( [ 'tags' ] ), 'The released version prints its missing tag, one per line.' );
+		$this->assertSame( "v1.3.0\n", $this->assert_cli_success( [ 'tag', '--untagged' ] ), 'The untagged releases print their tags, one per line, without creating them.' );
 
-		$output = $this->root . '/github-output';
-		$result = $this->cli( [ 'tags', '--github-output' ], [ 'GITHUB_OUTPUT' => $output ] );
+		$output = $this->root . '/.git/github-output';
+		$result = $this->cli( [ 'tag', '--untagged', '--github-output' ], [ 'GITHUB_OUTPUT' => $output ] );
 
-		$this->assertSame( 0, $result[0], 'The tags command writes GitHub Actions outputs: ' . $result[2] );
+		$this->assertSame( 0, $result[0], 'The tag command writes GitHub Actions outputs: ' . $result[2] );
 		$this->assertSame(
-			'result={"tags":[{"package":"example/library","version":"1.3.0","tag":"v1.3.0","prerelease":false,"notes":"- Add a feature."}]}' . "\n",
+			'result={"tags":[{"package":"example/library","version":"1.3.0","tag":"v1.3.0","title":"1.3.0","previousTag":"v1.2.3","prerelease":false,"exists":false,"created":false,"notes":"- Add a feature."}]}' . "\n",
 			file_get_contents( $output ),
-			'The result output carries each tag with its changelog notes, for a step that creates the tag and GitHub release.'
+			'Each tag carries its title, previous tag, status and changelog notes, like wp-release changeset-tag, for a step that creates the GitHub release.'
 		);
 
-		$this->git_tag( 'v1.3.0' );
+		$this->assertSame( "v1.3.0: missing.\n", $this->assert_cli_success( [ 'tag', '--dry-run' ] ), 'A dry run lists the missing tag without creating it.' );
+		$this->assertSame( "v1.3.0: created.\n", $this->assert_cli_success( [ 'tag' ] ), 'The tag command creates the missing tag.' );
+		$this->assertSame( "v1.2.3\nv1.3.0\n", $this->run_command( [ 'git', '-C', $this->root, 'tag', '--list' ] )[1], 'The release tag exists in the repository.' );
+		$this->assertSame( "v1.3.0: exists.\n", $this->assert_cli_success( [ 'tag' ] ), 'A rerun leaves the existing tag as it is.' );
+		$this->assertSame( '', $this->assert_cli_success( [ 'tag', '--untagged' ] ), 'Nothing is listed once the tag exists.' );
+	}
 
-		$this->assertSame( '', $this->assert_cli_success( [ 'tags' ] ), 'Nothing is listed once the tag exists.' );
+	public function test_tag_checks_the_expected_version_and_pushes_the_tags(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+		$this->commit_all( 'Initial release' );
+		$this->add_remote();
+
+		$this->assertStringContainsString( 'is at version 1.2.3, not 2.0.0', $this->assert_cli_failure( [ 'tag', '--version', '2.0.0' ] ), 'An expected version must match the version of the package.' );
+		$this->assertStringContainsString( 'cannot be combined with pushing tags', $this->assert_cli_failure( [ 'tag', '--untagged', '--push' ] ), 'Listing untagged releases does not push.' );
+		$this->assertStringContainsString( 'placeholder', $this->assert_cli_failure( [ 'tag', '--release-title', 'Release' ] ), 'A release title without a placeholder would name every release alike.' );
+
+		$result = json_decode( $this->assert_cli_success( [ 'tag', '--version', '1.2.3', '--release-title', 'Release {version}', '--push', '--json' ] ), true );
+
+		$this->assertSame( [ 'v1.2.3', 'Release 1.2.3', true ], [ $result['tags'][0]['tag'], $result['tags'][0]['title'], $result['tags'][0]['created'] ], 'The expected version selects the sole package and the release title template names the release.' );
+		$this->assertStringContainsString( 'refs/tags/v1.2.3', $this->run_command( [ 'git', '-C', $this->root, 'ls-remote', '--tags', 'origin' ] )[1], 'The created tag is pushed to the remote.' );
+	}
+
+	public function test_tag_notes_list_the_commits_without_a_changelog_section(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\"}\n" );
+		$this->commit_all( 'Initial release' );
+		$this->git_tag( 'v0.1.0' );
+		file_put_contents( $this->root . '/library.php', "<?php\n" );
+		$this->commit_all( 'Fix the library' );
+
+		$result = json_decode( $this->assert_cli_success( [ 'tag', '--version', '0.1.1', '--dry-run', '--json' ] ), true );
+
+		$this->assertSame( 'v0.1.0', $result['tags'][0]['previousTag'], 'The previous tag is the highest version below the release.' );
+		$this->assertMatchesRegularExpression( '/^- Fix the library \([0-9a-f]+\)$/D', $result['tags'][0]['notes'], 'Without a changelog section, the notes list the commits since the previous tag.' );
+	}
+
+	public function test_tag_since_tags_only_the_changed_packages(): void {
+		$this->two_package_config();
+		$this->commit_all( 'Base' );
+		$this->run_command( [ 'git', '-C', $this->root, 'branch', 'base' ] );
+		file_put_contents( $this->root . '/a/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		$this->commit_all( 'Change a' );
+
+		$result = json_decode( $this->assert_cli_success( [ 'tag', '--since', 'base', '--dry-run', '--json' ] ), true );
+
+		$this->assertSame( [ 'a/1.2.3' ], array_column( $result['tags'], 'tag' ), 'Only the packages changed since the ref are tagged.' );
 	}
 
 	public function test_tags_read_tag_only_releases_from_the_changelog(): void {
@@ -995,7 +1043,47 @@ PHP
 		$this->assert_cli_success( [ 'add', '--bump', 'patch', '--summary', 'Fix.', '--name', 'fix' ] );
 		$this->assert_cli_success( [ 'version', '--date', '2026-01-02' ] );
 
-		$this->assertSame( "v0.3.1\n", $this->assert_cli_success( [ 'tags' ] ), 'A tag-only package releases the changelog version above its latest tag.' );
+		$this->assertSame( "v0.3.1\n", $this->assert_cli_success( [ 'tag', '--untagged' ] ), 'A tag-only package releases the changelog version above its latest tag.' );
+	}
+
+	public function test_version_package_keeps_the_entries_of_other_packages(): void {
+		$this->two_package_config();
+		$this->assert_cli_success( [ 'add', '--package', 'a', '--bump', 'patch', '--package', 'b', '--bump', 'minor', '--summary', 'Change both.', '--name', 'both' ] );
+		$this->assert_cli_success( [ 'add', '--package', 'b', '--bump', 'patch', '--summary', 'Fix b.', '--name', 'b-only' ] );
+		$this->assert_cli_success( [ 'add', '--empty', '--name', 'none' ] );
+
+		$this->assert_cli_success( [ 'version', '--package', 'a', '--date', '2026-01-02' ] );
+
+		$this->assertStringContainsString( 'Version: 1.2.4', (string) file_get_contents( $this->root . '/a/plugin.php' ), 'The selected package is versioned.' );
+		$this->assertStringContainsString( 'Version: 2.2.3', (string) file_get_contents( $this->root . '/b/plugin.php' ), 'Other packages are left for their own release.' );
+		$this->assertSame( "---\n\"b\": minor\n---\n\nChange both.\n", file_get_contents( $this->root . '/.changeset/both.md' ), 'A changeset that also names other packages keeps their entries and its summary.' );
+		$this->assertFileExists( $this->root . '/.changeset/b-only.md', 'Changesets of other packages stay pending.' );
+		$this->assertFileExists( $this->root . '/.changeset/none.md', 'Changesets without packages are left for a run without --package.' );
+	}
+
+	public function test_version_snapshot_releases_timestamped_versions(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+		$this->assert_cli_success( [ 'add', '--bump', 'minor', '--summary', 'Add a feature.', '--name', 'feature' ] );
+
+		$this->assertStringContainsString( 'cannot be combined with --snapshot', $this->assert_cli_failure( [ 'version', '--snapshot', 'pr-7', '--prerelease', 'rc' ] ), 'A snapshot is not a numbered pre-release.' );
+
+		$result = json_decode( $this->assert_cli_success( [ 'version', '--snapshot', 'pr-7', '--dry-run', '--json' ] ), true );
+
+		$this->assertMatchesRegularExpression( '/^1\.3\.0-pr-7\.[0-9]{14}$/D', $result['releases'][0]['nextVersion'], 'A snapshot is the next version with the identifier and the UTC time.' );
+	}
+
+	public function test_base_branch_is_the_default_comparison_of_status(): void {
+		$this->two_package_config();
+		$this->commit_all( 'Base' );
+		$this->add_remote();
+		file_put_contents( $this->root . '/a/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		$this->commit_all( 'Change a' );
+
+		$result = $this->cli( [ 'status', '--base-branch', 'main', '--json' ] );
+		$status = json_decode( $result[1], true );
+
+		$this->assertSame( 2, $result[0], 'The changed package without a changeset fails the check: ' . $result[2] );
+		$this->assertSame( [ 'origin/main', [ 'a' ] ], [ $status['since'], $status['missingChangesets'] ], 'Without --since, status compares with the base branch on the remote.' );
 	}
 
 	public function test_github_output_requires_github_actions(): void {
@@ -1014,6 +1102,146 @@ PHP
 
 		$this->assertSame( '1.2.4', $plan['releases'][0]['nextVersion'], 'The result output is the compact release plan.' );
 		$this->assertMatchesRegularExpression( '/^diff<<ghadelimiter_[0-9a-f]{32}$/', $lines[1], 'Top-level strings like the dry-run diff are their own outputs with a random delimiter.' );
+	}
+
+	public function test_status_since_requires_a_changeset_for_each_changed_package(): void {
+		$this->two_package_config();
+		$this->assert_cli_success( [ 'add', '--package', 'b', '--bump', 'patch', '--summary', 'Base fix.', '--name', 'base' ] );
+		$this->commit_all( 'Base' );
+		$this->run_command( [ 'git', '-C', $this->root, 'branch', 'base' ] );
+		file_put_contents( $this->root . '/a/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		file_put_contents( $this->root . '/b/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		$this->commit_all( 'Change both packages' );
+
+		$result = $this->cli( [ 'status', '--since', 'base', '--json' ] );
+		$status = json_decode( $result[1], true );
+
+		$this->assertSame( 2, $result[0], 'Changed packages without a changeset fail the status check with exit code 2.' );
+		$this->assertSame( [ 'a', 'b' ], $status['missingChangesets'], 'A changeset already on the base does not count for the changes since the base.' );
+		$this->assertSame( [ 'a/plugin.php' ], $status['changedPackageFiles']['a'], 'The status lists the changed files of each package.' );
+		$this->assertStringContainsString( 'Changed package "a" has no changeset.', $result[2], 'The error names each changed package without a changeset.' );
+
+		$add = json_decode( $this->assert_cli_success( [ 'add', '--since', 'base', '--bump', 'minor', '--summary', 'Change both.', '--name', 'both', '--json' ] ), true );
+
+		$this->assertSame(
+			[
+				'file' => '.changeset/both.md',
+				'packages' => [
+					'a' => 'minor',
+					'b' => 'minor',
+				],
+				'summary' => 'Change both.',
+			],
+			$add,
+			'A single --bump with --since releases the changed packages without a changeset, and --json prints the created changeset.'
+		);
+
+		$this->commit_all( 'Add a changeset' );
+
+		$this->assertSame( 0, $this->cli( [ 'status', '--since', 'base' ] )[0], 'A changeset added since the base passes the status check.' );
+		$this->assertStringContainsString( 'No package changed since HEAD without a changeset', $this->assert_cli_failure( [ 'add', '--since', 'HEAD', '--bump', 'patch', '--summary', 'Nothing.' ] ), 'Without changed packages, add asks for the packages.' );
+	}
+
+	public function test_status_since_accepts_an_empty_changeset(): void {
+		$this->two_package_config();
+		$this->commit_all( 'Base' );
+		$this->run_command( [ 'git', '-C', $this->root, 'branch', 'base' ] );
+		file_put_contents( $this->root . '/a/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		$this->assert_cli_success( [ 'add', '--empty', '--name', 'none' ] );
+		$this->commit_all( 'Change without a release' );
+
+		$status = json_decode( $this->assert_cli_success( [ 'status', '--since', 'base', '--json' ] ), true );
+
+		$this->assertSame( [ 'a' ], $status['changedPackages'], 'The changed package is listed.' );
+		$this->assertSame( [], $status['missingChangesets'], 'An empty changeset added since the base records an explicit no-release decision.' );
+	}
+
+	public function test_ci_log_format_annotates_missing_changesets_and_writes_a_summary(): void {
+		$this->two_package_config();
+		$this->commit_all( 'Base' );
+		$this->run_command( [ 'git', '-C', $this->root, 'branch', 'base' ] );
+		file_put_contents( $this->root . '/a/plugin.php', "\n// Changed.\n", FILE_APPEND );
+		$this->commit_all( 'Change a' );
+
+		$summary = $this->root . '/summary.md';
+		$result = $this->cli(
+			[ 'status', '--since', 'base', '--ci' ],
+			[
+				'GITHUB_WORKSPACE' => $this->root,
+				'GITHUB_STEP_SUMMARY' => $summary,
+			]
+		);
+
+		$this->assertSame( 2, $result[0], 'The missing changeset fails the command.' );
+		$this->assertStringContainsString( "::error file=a/plugin.php,title=Missing changeset::Changed package \"a\" has no changeset.\n", $result[2], 'The missing changeset is a GitHub annotation on a changed file of the package.' );
+		$this->assertStringContainsString( "| a | missing changeset |\n", (string) file_get_contents( $summary ), 'The job summary lists each changed package with its changeset status.' );
+	}
+
+	public function test_ci_log_format_annotates_version_mismatches_on_their_line(): void {
+		file_put_contents( $this->root . '/plugin.php', "<?php\n/*\nPlugin Name: Example\nVersion: 1.2.3\n*/\n" );
+		file_put_contents( $this->root . '/readme.txt', "=== Example ===\nStable tag: 1.2.2\n" );
+		$this->plugin_config();
+
+		$result = $this->cli( [ 'status', '--log-format', 'github' ], [ 'GITHUB_WORKSPACE' => $this->root ] );
+
+		$this->assertSame( 2, $result[0], 'A version mismatch is a failed release check.' );
+		$this->assertStringContainsString( '::error file=readme.txt,line=2,title=Version mismatch::Version in ', $result[2], 'The mismatch is annotated on the file and line of the version.' );
+	}
+
+	public function test_exit_codes_separate_validation_errors_from_git_failures(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+
+		$this->assertSame( 2, $this->cli( [ 'status', '--bogus' ] )[0], 'An invalid option exits with code 2.' );
+		$this->assertStringContainsString( 'Unknown log format', $this->cli( [ 'status', '--log-format', 'xml' ] )[2], 'An unknown log format is rejected.' );
+
+		$result = $this->cli( [ 'status', '--since', 'missing-ref' ] );
+
+		$this->assertSame( 1, $result[0], 'A failed git command exits with code 1, like wp-release.' );
+		$this->assertStringContainsString( 'git diff', $result[2], 'The error names the failed git command.' );
+		$this->assertStringNotContainsString( 'Stack trace', $result[2], 'Unexpected failures print the message without a stack trace.' );
+	}
+
+	public function test_every_command_prints_json(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"1.2.3\"}\n" );
+
+		$this->assertSame(
+			[
+				'config' => 'changesets.config.php',
+				'created' => true,
+				'changesets' => '.changeset',
+				'packages' => [ 'example/library' ],
+			],
+			json_decode( $this->assert_cli_success( [ 'init', '--json' ] ), true ),
+			'init prints the config file, changeset directory and packages.'
+		);
+		$this->assertSame(
+			[
+				'file' => '.changeset/none.md',
+				'packages' => [],
+				'summary' => '',
+			],
+			json_decode( $this->assert_cli_success( [ 'add', '--empty', '--name', 'none', '--json' ] ), true ),
+			'add prints the created changeset.'
+		);
+		$this->assertSame( [ 'recovered' => false ], json_decode( $this->assert_cli_success( [ 'recover', '--json' ] ), true ), 'recover prints whether it recovered a release.' );
+	}
+
+	public function test_global_options_name_the_project_and_its_tags(): void {
+		file_put_contents( $this->root . '/composer.json', "{\"version\":\"1.2.3\"}\n" );
+		$options = [ '--project-name', 'example', '--tag-format', 'release-{version}' ];
+
+		$this->assertStringContainsString( '--project-name', $this->assert_cli_failure( [ 'status' ] ), 'A project without a name points to --project-name.' );
+
+		$this->assert_cli_success( array_merge( [ 'add', '--bump', 'patch', '--summary', 'Fix.', '--name', 'fix' ], $options ) );
+		$status = json_decode( $this->assert_cli_success( array_merge( [ 'status', '--json' ], $options ) ), true );
+
+		$this->assertSame( [ 'example', 'release-1.2.4' ], [ $status['releases'][0]['package'], $status['releases'][0]['tag'] ], 'The project name and tag format apply to one command.' );
+
+		$config = $this->root . '/release.php';
+		file_put_contents( $config, "<?php\nreturn [ 'tagFormat' => 'r{version}', 'packages' => [ [ 'glob' => '.', 'id' => 'example', 'version' => [ 'from' => \\WPElevator\\PHP_Changesets\\composer_json_version(), 'to' => [ \\WPElevator\\PHP_Changesets\\composer_json_version() ] ] ] ] ];\n" );
+		$status = json_decode( $this->assert_cli_success( [ 'status', '--json', '--config', $config ] ), true );
+
+		$this->assertSame( 'r1.2.4', $status['releases'][0]['tag'], 'The --config file replaces changesets.config.php.' );
 	}
 
 	private function two_package_config(): void {
@@ -1082,6 +1310,23 @@ PHP;
 		file_put_contents( $this->root . '/changesets.config.php', $config );
 	}
 
+	private function commit_all( string $message ): void {
+		$this->run_command( [ 'git', '-C', $this->root, 'add', '--all' ] );
+		$this->run_command( [ 'git', '-C', $this->root, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', $message ] );
+	}
+
+	/**
+	 * Add a bare origin remote inside the ignored git directory, with the
+	 * current commit as its main branch.
+	 */
+	private function add_remote(): void {
+		$remote = $this->root . '/.git/remote.git';
+		$this->run_command( [ 'git', 'init', '-q', '--bare', $remote ] );
+		$this->run_command( [ 'git', '-C', $this->root, 'remote', 'add', 'origin', $remote ] );
+		$this->run_command( [ 'git', '-C', $this->root, 'push', '-q', 'origin', 'HEAD:refs/heads/main' ] );
+		$this->run_command( [ 'git', '-C', $this->root, 'fetch', '-q', 'origin' ] );
+	}
+
 	private function git_tag( string $tag ): void {
 		$this->run_command( [ 'git', '-C', $this->root, 'tag', $tag ] );
 	}
@@ -1114,7 +1359,7 @@ PHP;
 		}
 
 		$command = array_merge(
-			[ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changesets' ],
+			[ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changeset' ],
 			$args,
 			[ '--root', $this->root ]
 		);

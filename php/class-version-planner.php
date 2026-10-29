@@ -4,10 +4,10 @@ namespace WPElevator\PHP_Changesets;
 
 /**
  * Combine changesets into one release per package, with the highest bump and
- * the ordered release notes.
+ * the ordered changelog entries.
  *
  * The releases carry the wp-release PackageRelease data contract: package,
- * currentVersion, bump, nextVersion, tag, changesets, notes and paths. Paths
+ * currentVersion, bump, nextVersion, tag, changesets, changelog and paths. Paths
  * are appended by the engine once its file edits are planned. A pre-release
  * current version graduates like `semver inc`, so a patch of `1.2.4-rc.1`
  * plans `1.2.4`; see Semver::next().
@@ -24,9 +24,9 @@ final class Version_Planner {
 
 	private Tag_Format $tag_format;
 
-	public function __construct() {
-		$this->semver = new Semver();
-		$this->tag_format = new Tag_Format();
+	public function __construct( ?Semver $semver = null, ?Tag_Format $tag_format = null ) {
+		$this->semver = $semver ?? new Semver();
+		$this->tag_format = $tag_format ?? new Tag_Format();
 	}
 
 	/**
@@ -39,7 +39,7 @@ final class Version_Planner {
 	 * @param array<int, array{file: string, name: string, packages: array<string, string>, summary: string}> $changesets
 	 *        Parsed changesets in filename order.
 	 * @param array<string, string> $current_versions Package name to current version.
-	 * @return array<int, array{package: string, currentVersion: string, bump: string|null, nextVersion: string, tag: string|null, changesets: array<int, array{file: string, packages: array<string, string>, summary: string}>, notes: array<int, array{name: string, summary: string}>}>
+	 * @return array<int, array{package: string, currentVersion: string, bump: string|null, nextVersion: string, tag: string|null, changesets: array<int, array{file: string, packages: array<string, string>, summary: string}>, changelog: string}>
 	 */
 	public function plan( array $config, array $packages, array $changesets, array $current_versions ): array {
 		$releases = [];
@@ -52,7 +52,7 @@ final class Version_Planner {
 				'nextVersion' => $current_versions[ $package['name'] ] ?? '',
 				'tag' => null,
 				'changesets' => [],
-				'notes' => [],
+				'changelog' => '',
 			];
 
 			if ( ! $this->semver->is_valid( $release['currentVersion'] ) ) {
@@ -69,11 +69,6 @@ final class Version_Planner {
 						'summary' => $changeset['summary'],
 					];
 
-					$release['notes'][] = [
-						'name' => $changeset['name'],
-						'summary' => $changeset['summary'],
-					];
-
 					if ( null === $release['bump'] || self::BUMP_RANKS[ $level ] > self::BUMP_RANKS[ $release['bump'] ] ) {
 						$release['bump'] = $level;
 					}
@@ -81,6 +76,7 @@ final class Version_Planner {
 			}
 
 			if ( null !== $release['bump'] ) {
+				$release['changelog'] = $this->changelog( $release['changesets'] );
 				$release['nextVersion'] = $this->next_version( $config, $package, $release );
 				$release['tag'] = $this->tag_format->format( $this->tag_format->of( $config, $package ), $package, $release['nextVersion'] );
 			}
@@ -89,6 +85,22 @@ final class Version_Planner {
 		}
 
 		return $releases;
+	}
+
+	/**
+	 * The default changelog of a release, a Markdown list of its changeset
+	 * summaries like the one added to CHANGELOG.md.
+	 *
+	 * @param array<int, array{summary: string}> $changesets
+	 */
+	private function changelog( array $changesets ): string {
+		$entries = [];
+
+		foreach ( $changesets as $changeset ) {
+			$entries[] = '- ' . str_replace( "\n", "\n  ", $changeset['summary'] );
+		}
+
+		return implode( "\n", $entries );
 	}
 
 	/**

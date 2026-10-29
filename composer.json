@@ -15,6 +15,6 @@
 		]
 	},
 	"bin": [
-		"bin/changesets"
+		"bin/changeset"
 	]
 }

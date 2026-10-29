@@ -119,16 +119,7 @@ final class Reader_Planner_Test extends TestCase {
 							'summary' => 'Alpha fix.',
 						],
 					],
-					'notes' => [
-						[
-							'name' => 'shared.md',
-							'summary' => 'Shared note.',
-						],
-						[
-							'name' => 'z-fix.md',
-							'summary' => 'Alpha fix.',
-						],
-					],
+					'changelog' => "- Shared note.\n- Alpha fix.",
 				],
 				[
 					'package' => 'example/beta',
@@ -151,20 +142,11 @@ final class Reader_Planner_Test extends TestCase {
 							'summary' => 'Shared note.',
 						],
 					],
-					'notes' => [
-						[
-							'name' => 'a-feature.md',
-							'summary' => 'Minor note.',
-						],
-						[
-							'name' => 'shared.md',
-							'summary' => 'Shared note.',
-						],
-					],
+					'changelog' => "- Minor note.\n- Shared note.",
 				],
 			],
 			$releases,
-			'The highest bump should win per package and release notes should aggregate in filename order.'
+			'The highest bump should win per package and the changelog entries should aggregate in filename order.'
 		);
 	}
 
@@ -199,7 +181,7 @@ final class Reader_Planner_Test extends TestCase {
 					'nextVersion' => '1.2.3',
 					'tag' => null,
 					'changesets' => [],
-					'notes' => [],
+					'changelog' => '',
 				],
 			],
 			$releases,

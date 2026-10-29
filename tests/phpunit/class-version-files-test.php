@@ -7,6 +7,7 @@ use PHPUnit\Framework\TestCase;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use ReflectionMethod;
+use WPElevator\PHP_Changesets\Git;
 use WPElevator\PHP_Changesets\Project_Files;
 use WPElevator\PHP_Changesets\Release_Exception;
 use WPElevator\PHP_Changesets\Version_Files;
@@ -262,6 +263,66 @@ final class Version_Files_Test extends TestCase {
 		}
 
 		$this->assertSame( 0, proc_close( $process ), 'The temporary repository is initialized.' );
+	}
+
+	public function test_git_runner_is_replaceable(): void {
+		$git = new class( $this->directory ) extends Git {
+
+			/**
+			 * @var array<int, string[]>
+			 */
+			public array $calls = [];
+
+			public function run( array $arguments, array $exit_codes = [ 0 ] ): string {
+				$this->calls[] = $arguments;
+
+				return "v1.0.0\nv1.2.0\nv1.1.0\n";
+			}
+		};
+		$versions = new Version_Files( new Project_Files( $this->directory ), $git );
+
+		$this->assertSame(
+			'1.2.0',
+			$versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => 'v{version}',
+				]
+			),
+			'The version source reads the tags of the injected git runner, without a repository.'
+		);
+		$this->assertSame( [ [ 'tag', '--list' ] ], $git->calls, 'The tags are listed with one git command.' );
+	}
+
+	public function test_version_mismatches_carry_their_file_and_line(): void {
+		file_put_contents( $this->directory . '/plugin.php', "<?php\n/*\nVersion: 1.2.2\n*/\n" );
+		$problems = [];
+
+		try {
+			$this->versions->propose(
+				[
+					'kind' => 'wordpress-plugin-header',
+					'file' => 'plugin.php',
+				],
+				'1.2.3',
+				'1.3.0'
+			);
+		} catch ( Release_Exception $error ) {
+			$problems = $error->problems();
+		}
+
+		$this->assertSame(
+			[
+				[
+					'message' => 'Version in ' . realpath( $this->directory ) . '/plugin.php is 1.2.2, expected 1.2.3.',
+					'file' => realpath( $this->directory ) . '/plugin.php',
+					'title' => 'Version mismatch',
+					'line' => 3,
+				],
+			],
+			$problems,
+			'A version mismatch is a problem on the file and line of the version, for annotations.'
+		);
 	}
 
 	public function test_git_tag_patterns_expand_package_placeholders(): void {

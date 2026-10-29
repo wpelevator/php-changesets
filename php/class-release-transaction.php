@@ -36,7 +36,7 @@ final class Release_Transaction {
 		$root = $this->files->get_root();
 
 		if ( $this->has_pending() ) {
-			throw new Release_Exception( 'An interrupted release is pending; run changesets recover.' );
+			throw new Release_Exception( 'An interrupted release is pending; run changeset recover.' );
 		}
 
 		$entries = $this->preflight( $edits );

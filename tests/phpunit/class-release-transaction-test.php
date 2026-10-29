@@ -138,13 +138,13 @@ PHP;
 			( new Release_Engine( new Project_Files( $this->directory ) ) )->plan();
 			$this->fail( 'Planning must stop while interrupted release state remains.' );
 		} catch ( Release_Exception $error ) {
-			$this->assertStringContainsString( 'run changesets recover', $error->getMessage(), 'The planner should direct the maintainer to recovery.' );
+			$this->assertStringContainsString( 'run changeset recover', $error->getMessage(), 'The planner should direct the maintainer to recovery.' );
 		}
 
 		file_put_contents( $this->directory . '/.php-changesets-transaction/restore-0', 'left from an interrupted recovery' );
 
 		$recovery = proc_open(
-			[ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changesets', 'recover', '--root', $this->directory ],
+			[ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changeset', 'recover', '--root', $this->directory ],
 			[
 				0 => [ 'pipe', 'r' ],
 				1 => [ 'pipe', 'w' ],

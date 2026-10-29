@@ -19,6 +19,49 @@ final class Package_Discovery {
 	}
 
 	/**
+	 * Find a package by its identifier, or by its path under the configured
+	 * root like `plugins/alpha/`, as wp-release `findPackage()` does.
+	 *
+	 * @param array<int, array{name: string, path: string, directory: string, group: int}> $packages
+	 * @return array{name: string, path: string, directory: string, group: int}|null
+	 */
+	public function find( array $packages, string $identifier ): ?array {
+		$path = rtrim( (string) preg_replace( '#^\./#', '', str_replace( '\\', '/', $identifier ) ), '/' );
+		$by_name = array_values( array_filter( $packages, static fn( array $package ): bool => $package['name'] === $identifier ) );
+		$by_path = array_values( array_filter( $packages, static fn( array $package ): bool => $package['path'] === $path ) );
+
+		return $by_name[0] ?? $by_path[0] ?? null;
+	}
+
+	/**
+	 * Resolve package identifiers or paths to the names of the packages,
+	 * keeping their order and rejecting unknown or repeated packages.
+	 *
+	 * @param array<int, array{name: string, path: string, directory: string, group: int}> $packages
+	 * @param string[] $identifiers Package identifiers, or their paths under the configured root.
+	 * @return string[]
+	 */
+	public function names( array $packages, array $identifiers ): array {
+		$names = [];
+
+		foreach ( $identifiers as $identifier ) {
+			$package = $this->find( $packages, $identifier );
+
+			if ( null === $package ) {
+				throw new Release_Exception( "Unknown package: {$identifier}." );
+			}
+
+			if ( in_array( $package['name'], $names, true ) ) {
+				throw new Release_Exception( "Package {$package['name']} is selected more than once." );
+			}
+
+			$names[] = $package['name'];
+		}
+
+		return $names;
+	}
+
+	/**
 	 * Find the packages of every configured group, in configured group order.
 	 *
 	 * Packages are ordered by group, then by relative path within the group.
