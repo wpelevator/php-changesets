@@ -25,21 +25,52 @@ final class Project_Config {
 	 */
 	private const ROOT_TAG_FORMAT = 'v{version}';
 
-	private const CANONICAL_KEYS = [ 'changesets', 'tagFormat', 'root', 'changelog', 'readmeChangelog', 'nextVersion', 'changelogEntry', 'packages' ];
+	private const CANONICAL_KEYS = [ 'changesets', 'tagFormat', 'releaseTitle', 'root', 'remote', 'baseBranch', 'changelog', 'readmeChangelog', 'nextVersion', 'changelogEntry', 'packages' ];
 
 	private Project_Files $files;
 
-	public function __construct( Project_Files $files ) {
+	private ?string $config_path;
+
+	private ?string $tag_format;
+
+	private ?string $project_name;
+
+	/**
+	 * Settings that replace the configured ones for one command.
+	 *
+	 * @var array{remote?: string, baseBranch?: string}
+	 */
+	private array $settings;
+
+	/**
+	 * @param array{config?: string, tagFormat?: string, projectName?: string, remote?: string, baseBranch?: string} $overrides
+	 *     Command-line overrides, like the global options of the CLI: the absolute path of a
+	 *     config file to load instead of changesets.config.php (--config), a tag format that
+	 *     replaces the configured ones (--tag-format), the identifier of an inferred root
+	 *     package (--project-name), and the git remote and base branch (--remote, --base-branch).
+	 */
+	public function __construct( Project_Files $files, array $overrides = [] ) {
 		$this->files = $files;
+		$this->config_path = $overrides['config'] ?? null;
+		$this->tag_format = $overrides['tagFormat'] ?? null;
+		$this->project_name = $overrides['projectName'] ?? null;
+		$this->settings = array_intersect_key( $overrides, array_flip( [ 'remote', 'baseBranch' ] ) );
 	}
 
 	/**
-	 * Whether the configuration file exists at the project root.
+	 * Whether a configuration file is selected or exists at the project root.
 	 */
 	public function has_config(): bool {
 		$file = $this->config_file();
 
-		return file_exists( $file ) || is_link( $file );
+		return null !== $this->config_path || file_exists( $file ) || is_link( $file );
+	}
+
+	/**
+	 * The configuration file, selected or at the project root.
+	 */
+	public function config_file(): string {
+		return $this->config_path ?? $this->files->get_root() . '/' . self::CONFIG_PATH;
 	}
 
 	/**
@@ -50,16 +81,52 @@ final class Project_Config {
 	 * one, the returned array is validated through the same define()
 	 * checks that hand-written configurations use.
 	 *
-	 * @return array{changesets: string, tagFormat: string, root: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
+	 * @return array{changesets: string, tagFormat: string, releaseTitle: string|callable|null, root: string|null, remote: string, baseBranch: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
 	 */
 	public function load(): array {
 		$this->reject_removed_configs();
 
-		if ( ! $this->has_config() ) {
-			return $this->infer();
+		$config = $this->has_config() ? $this->load_file() : $this->infer();
+
+		if ( [] !== $this->settings ) {
+			$config = define_config( array_merge( $config, $this->settings ) );
 		}
 
+		return null === $this->tag_format ? $config : $this->with_tag_format( $config, $this->tag_format );
+	}
+
+	/**
+	 * Replace the tag format of the repository and every group for one
+	 * command, like the wp-release global --tag-format.
+	 *
+	 * @param array<string, mixed> $config
+	 * @return array<string, mixed>
+	 */
+	private function with_tag_format( array $config, string $tag_format ): array {
+		if ( 1 !== substr_count( $tag_format, '{version}' ) ) {
+			throw new Release_Exception( '--tag-format must contain {version} exactly once.' );
+		}
+
+		$config['tagFormat'] = $tag_format;
+
+		foreach ( array_keys( $config['packages'] ) as $index ) {
+			$config['packages'][ $index ]['tagFormat'] = null;
+		}
+
+		return $config;
+	}
+
+	/**
+	 * Load and validate the selected or root configuration file.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function load_file(): array {
 		$file = $this->config_file();
+
+		if ( ! file_exists( $file ) && ! is_link( $file ) ) {
+			throw new Release_Exception( 'PHP Changesets config not found: ' . $file . '.' );
+		}
 
 		if ( is_link( $file ) || ! is_file( $file ) ) {
 			throw new Release_Exception( 'The PHP Changesets config must be a regular file.' );
@@ -88,7 +155,7 @@ final class Project_Config {
 	 * name and version in its own manifest. Otherwise the scaffold shows
 	 * how to extend the single group instead.
 	 *
-	 * @return array{changesets: string, tagFormat: string, root: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
+	 * @return array{changesets: string, tagFormat: string, releaseTitle: string|callable|null, root: string|null, remote: string, baseBranch: string|null, changelog: string, readmeChangelog: bool, nextVersion: callable|null, changelogEntry: callable|null, packages: array<int, mixed>}
 	 */
 	private function infer(): array {
 		$manifest = $this->manifest();
@@ -165,41 +232,29 @@ final class Project_Config {
 			$packages[] = $manifest_packages;
 		}
 
-		return define_config(
-			[
-				'readmeChangelog' => $this->has_readme_changelog(),
-				'packages' => $packages,
-			]
-		);
+		// Readme changelog updates are opt-in, like in wp-release.
+		return define_config( [ 'packages' => $packages ] );
 	}
 
 	/**
-	 * Whether the root readme.txt has a `== Changelog ==` section that
-	 * releases should add to, like on WordPress.org.
-	 */
-	private function has_readme_changelog(): bool {
-		$readme = $this->files->get_root() . '/readme.txt';
-
-		return is_file( $readme ) && 1 === preg_match( '/^==\s*Changelog\s*==\s*$/mi', (string) file_get_contents( $readme ) );
-	}
-
-	/**
-	 * A fixed identifier for an inferred root package without a Composer
-	 * name: the plugin slug of its main file, so that changesets keep naming
-	 * the package in checkouts under any directory name.
+	 * A fixed identifier for an inferred root package: the --project-name,
+	 * or without a Composer name the plugin slug of its main file, so that
+	 * changesets keep naming the package in checkouts under any directory name.
 	 *
 	 * @param string[] $plugin_files
 	 */
 	private function root_id( string $id_from, array $plugin_files ): ?string {
-		if ( 'path' !== $id_from ) {
-			return null;
+		$id = $this->project_name;
+
+		if ( null === $id && 'path' === $id_from ) {
+			if ( [] === $plugin_files ) {
+				throw new Release_Exception( 'Pass --project-name NAME, add a name to composer.json, or add a PHP Changesets config with a package id, to name the project.' );
+			}
+
+			$id = basename( $plugin_files[0], '.php' );
 		}
 
-		if ( [] === $plugin_files ) {
-			throw new Release_Exception( 'Add a name to composer.json, or a PHP Changesets config with a package id, to name the project.' );
-		}
-
-		return basename( $plugin_files[0], '.php' );
+		return $id;
 	}
 
 	/**
@@ -279,10 +334,6 @@ final class Project_Config {
 		return $manifest;
 	}
 
-	private function config_file(): string {
-		return $this->files->get_root() . '/' . self::CONFIG_PATH;
-	}
-
 	private function reject_removed_configs(): void {
 		$root = $this->files->get_root();
 		$found = [];
@@ -290,7 +341,7 @@ final class Project_Config {
 		foreach ( self::REMOVED_PATHS as $path ) {
 			$file = $root . '/' . $path;
 
-			if ( file_exists( $file ) || is_link( $file ) ) {
+			if ( $file !== $this->config_path && ( file_exists( $file ) || is_link( $file ) ) ) {
 				$found[] = $path;
 			}
 		}

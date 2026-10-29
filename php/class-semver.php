@@ -157,6 +157,25 @@ final class Semver {
 	}
 
 	/**
+	 * Apply the wp-release snapshot transform to a stable release version:
+	 * the identifier, like `pr-251`, and a UTC time, like `1.3.0-pr-251.20261012183005`,
+	 * so that every snapshot is unique and they sort by time.
+	 *
+	 * @param string $time UTC time of the snapshot, like 20261012183005.
+	 */
+	public function with_snapshot( string $stable, string $snapshot, string $time ): string {
+		if ( 1 !== preg_match( self::PRERELEASE_PATTERN, $snapshot ) ) {
+			throw new Release_Exception( "Invalid snapshot \"$snapshot\"; expected dot separated letters, digits and hyphens, like pr-251." );
+		}
+
+		if ( ! $this->is_valid( $stable ) || $this->is_pre_release( $stable ) ) {
+			throw new Release_Exception( "Cannot release \"$stable\" as a snapshot: expected a stable version." );
+		}
+
+		return $stable . '-' . $snapshot . '.' . $time;
+	}
+
+	/**
 	 * The pre-release identifiers of a version, or null when it is stable.
 	 *
 	 * @return string[]|null
