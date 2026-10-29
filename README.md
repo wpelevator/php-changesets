@@ -68,4 +68,4 @@ The `resolve` callback runs for status and release planning; `replace` runs when
 
 Classes live in `php/` with Composer classmap autoloading, and tests live in `tests/phpunit/`, matching this monorepo's PHP package layout. The `bin/changesets` entry point loads `php/bootstrap.php` so it also runs directly from a checkout. Run `docker compose run --rm wordpress vendor/bin/phpunit --testsuite php/php-changesets` from the monorepo root to test the package.
 
-This package is excluded from the monorepo's `wp-release` workflow until its first tag exists. Its first MVP tag will need to be created separately after the release commit is reviewed; the PHP CLI does not create tags. A later split push will also need the `wpelevator/php-changesets` release repository.
+The first MVP tag `php/php-changesets/0.1.0` was created separately, because the PHP CLI does not create tags. The package now releases through the monorepo's `wp-release` workflow like the other `php/*` packages, and its split push still needs the `wpelevator/php-changesets` release repository.
