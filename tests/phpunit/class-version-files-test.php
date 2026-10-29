@@ -224,6 +224,119 @@ final class Version_Files_Test extends TestCase {
 		);
 	}
 
+	public function test_theme_header_reads_and_replaces_the_style_css_version(): void {
+		$contents = "/*\nTheme Name: Example\nVersion: 1.2.3\n*/\n";
+		file_put_contents( $this->directory . '/style.css', $contents );
+
+		$this->assertSame( '1.2.3', $this->versions->read_current( [ 'kind' => 'wordpress-theme-header' ] ), 'The theme header defaults to the package stylesheet path.' );
+
+		$proposal = $this->versions->propose(
+			[
+				'kind' => 'wordpress-theme-header',
+				'file' => 'style.css',
+			],
+			'1.2.3',
+			'1.3.0'
+		);
+
+		$this->assertSame( str_replace( '1.2.3', '1.3.0', $contents ), $proposal['new'], 'The theme header proposal replaces only the version value.' );
+		$this->assertSame( $contents, file_get_contents( $this->directory . '/style.css' ), 'Proposing a theme header edit does not write the file.' );
+	}
+
+	/**
+	 * Build an initialized repository with given tags without git metadata writes.
+	 */
+	private function init_repository(): void {
+		$process = proc_open(
+			[ 'git', 'init', '-q', $this->directory ],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'pipe', 'w' ],
+			],
+			$pipes
+		);
+
+		foreach ( $pipes as $pipe ) {
+			fclose( $pipe );
+		}
+
+		$this->assertSame( 0, proc_close( $process ), 'The temporary repository is initialized.' );
+	}
+
+	public function test_git_tag_patterns_expand_package_placeholders(): void {
+		$this->init_repository();
+
+		foreach ( [ 'example/lib-v1.0.0', 'packages/lib-v1.1.0', 'v1.2.0', 'packages/lib/1.3.0', '1.4.0' ] as $tag ) {
+			$reference = $this->directory . '/.git/refs/tags/' . $tag;
+			@mkdir( dirname( $reference ), 0777, true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Experimental subprocesses may already have created the directory.
+			file_put_contents( $reference, str_repeat( 'a', 40 ) . "\n" );
+		}
+
+		$package = [
+			'name' => 'example/lib',
+			'path' => 'packages/lib',
+		];
+
+		$this->assertSame(
+			'1.0.0',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => '{name}-v{version}',
+				],
+				$package
+			),
+			'Package names expand into the tag pattern.'
+		);
+		$this->assertSame(
+			'1.1.0',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => '{path}-v{version}',
+				],
+				$package
+			),
+			'Package paths expand into the tag pattern.'
+		);
+		$this->assertSame(
+			'1.2.0',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => 'v{version}',
+				],
+				null
+			),
+			'Without package context a literal pattern matches as is.'
+		);
+		$this->assertSame(
+			'1.3.0',
+			$this->versions->read_current( [ 'kind' => 'git-tag' ], $package ),
+			'Without a pattern the package reads the {path}/{version} default tags.'
+		);
+		$this->assertSame(
+			'1.4.0',
+			$this->versions->read_current( [ 'kind' => 'git-tag' ], null ),
+			'Without package context the default expands like a package at the root.'
+		);
+		$this->assertSame(
+			'1.1.0',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => '{path}-v{version}',
+				],
+				[
+					'name' => 'example/other',
+					'path' => 'packages//lib',
+				]
+			),
+			'Expanded separators collapse like other package templates.'
+		);
+	}
+
 	public function test_duplicate_version_is_rejected(): void {
 		file_put_contents( $this->directory . '/composer.json', '{"version":"1.0.0","version":"1.0.0"}' );
 
@@ -274,6 +387,7 @@ final class Version_Files_Test extends TestCase {
 
 		$source = [
 			'kind' => 'git-tag',
+			'pattern' => 'v{version}',
 			'initialVersion' => '1.0.0',
 		];
 
@@ -314,7 +428,7 @@ final class Version_Files_Test extends TestCase {
 
 		mkdir( $this->directory . '/.git/refs/tags/releases' );
 
-		foreach ( [ 'v1.9.0', 'v1.10.0', 'v2.0.0-rc.1' ] as $tag ) {
+		foreach ( [ 'v1.9.0', 'v1.10.0' ] as $tag ) {
 			file_put_contents( $this->directory . '/.git/refs/tags/releases/' . $tag, str_repeat( 'a', 40 ) . "\n" );
 		}
 
@@ -330,5 +444,53 @@ final class Version_Files_Test extends TestCase {
 		);
 		$this->assertTrue( $this->versions->tag_exists( 'releases/v1.9.0' ), 'An exact existing tag is found.' );
 		$this->assertFalse( $this->versions->tag_exists( 'releases/*' ), 'A wildcard is not treated as an exact tag.' );
+	}
+
+	public function test_git_tag_sources_read_and_order_prerelease_versions(): void {
+		$this->init_repository();
+
+		foreach ( [ 'v1.9.0', 'v1.10.0', 'v2.0.0-rc.1', 'v2.0.0-rc.2', 'v2.0.0-x.11' ] as $tag ) {
+			file_put_contents( $this->directory . '/.git/refs/tags/' . $tag, str_repeat( 'a', 40 ) . "\n" );
+		}
+
+		$this->assertSame(
+			'2.0.0-x.11',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => 'v{version}',
+				]
+			),
+			'Pre-release identifiers compare lexically and their sequences numerically.'
+		);
+
+		file_put_contents( $this->directory . '/.git/refs/tags/v2.0.0', str_repeat( 'a', 40 ) . "\n" );
+
+		$this->assertSame(
+			'2.0.0',
+			$this->versions->read_current(
+				[
+					'kind' => 'git-tag',
+					'pattern' => 'v{version}',
+				]
+			),
+			'A stable version outranks the pre-releases of the same base.'
+		);
+	}
+
+	public function test_tagged_versions_list_the_spans_sharing_a_prefix(): void {
+		$this->init_repository();
+
+		foreach ( [ 'example/lib-v1.0.0', 'example/lib-v1.1.0-rc.1', 'other-v1.0.0' ] as $tag ) {
+			$reference = $this->directory . '/.git/refs/tags/' . $tag;
+			@mkdir( dirname( $reference ), 0777, true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Experimental subprocesses may already have created the directory.
+			file_put_contents( $reference, str_repeat( 'a', 40 ) . "\n" );
+		}
+
+		$this->assertSame(
+			[ '1.0.0', '1.1.0-rc.1' ],
+			$this->versions->tagged_versions( 'example/lib-v' ),
+			'Tagged version spans drop the package prefix and keep pre-release spans.'
+		);
 	}
 }

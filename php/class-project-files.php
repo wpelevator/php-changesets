@@ -56,4 +56,21 @@ final class Project_Files {
 
 		return $path;
 	}
+
+	/**
+	 * Bind a second resolver to a package directory inside the project root.
+	 *
+	 * The returned instance offers the same path resolution guarantees, but
+	 * resolves relative paths against the package directory instead of the
+	 * project root.
+	 */
+	public function package( string $relative_path ): self {
+		$directory = realpath( $this->resolve( $relative_path ) );
+
+		if ( false === $directory || ! is_dir( $directory ) ) {
+			throw new Release_Exception( "Package directory is missing or outside the project: {$relative_path}." );
+		}
+
+		return new self( $directory );
+	}
 }

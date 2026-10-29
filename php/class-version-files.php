@@ -9,15 +9,21 @@ final class Version_Files {
 
 	private Project_Files $files;
 
+	private Semver $semver;
+
+	private Tag_Format $tag_format;
+
 	public function __construct( Project_Files $files ) {
 		$this->files = $files;
+		$this->semver = new Semver();
+		$this->tag_format = new Tag_Format();
 	}
 
-	public function read_current( array $source ): string {
+	public function read_current( array $source, ?array $package = null ): string {
 		if ( ( $source['kind'] ?? '' ) === 'git-tag' ) {
-			$pattern = $source['pattern'] ?? 'v{version}';
+			$pattern = $this->package_pattern( $source['pattern'] ?? Tag_Format::DEFAULT, $package );
 
-			if ( ! is_string( $pattern ) || 1 !== substr_count( $pattern, '{version}' ) ) {
+			if ( 1 !== substr_count( $pattern, '{version}' ) ) {
 				throw new Release_Exception( 'A tag pattern must contain {version} exactly once.' );
 			}
 
@@ -25,29 +31,36 @@ final class Version_Files {
 
 			if (
 				array_key_exists( 'initialVersion', $source )
-				&& ( ! is_string( $initial_version ) || ! preg_match( '/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/D', $initial_version ) )
+				&& ( ! is_string( $initial_version ) || ! $this->semver->is_valid( $initial_version ) || $this->semver->is_pre_release( $initial_version ) )
 			) {
-				throw new Release_Exception( 'Initial version must be a stable X.Y.Z version.' );
+				throw new Release_Exception( 'Initial version must be a stable version.' );
 			}
 
 			$parts = explode( '{version}', $pattern );
-			$expression = '/^' . preg_quote( $parts[0], '/' ) . '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' . preg_quote( $parts[1], '/' ) . '$/D';
+			// The version span may carry a semver pre-release; build metadata never counts.
+			$expression = '/^' . preg_quote( $parts[0], '/' ) . '((?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}(?:-(?:[0-9A-Za-z-]+)(?:\.[0-9A-Za-z-]+)*)?)' . preg_quote( $parts[1], '/' ) . '$/D';
 			$versions = [];
 
 			foreach ( $this->tags() as $tag ) {
 				if ( preg_match( $expression, $tag, $matches ) ) {
-					$versions[] = $matches[1] . '.' . $matches[2] . '.' . $matches[3];
+					$versions[] = $matches[1];
 				}
 			}
 
-			usort( $versions, 'version_compare' );
+			usort( $versions, fn( string $a, string $b ): int => $this->semver->compare( $a, $b ) );
 
 			if ( 0 === count( $versions ) ) {
 				if ( null !== $initial_version ) {
 					return $initial_version;
 				}
 
-				throw new Release_Exception( 'No stable version tag matches ' . $pattern . '.' );
+				throw new Release_Exception(
+					sprintf(
+						'No version tag matches %1$s. Tag the current release, like git tag %2$s, or set the version before the first release with git_tag_version( null, \'0.1.0\' ).',
+						$pattern,
+						str_replace( '{version}', '0.1.0', $pattern )
+					)
+				);
 			}
 
 			return $versions[ count( $versions ) - 1 ];
@@ -58,6 +71,41 @@ final class Version_Files {
 		$match = $this->locate( $contents, $source );
 
 		if ( null === $match ) {
+			throw new Release_Exception( 'Version is missing from ' . $file . '.' );
+		}
+
+		return $match['value'];
+	}
+
+	/**
+	 * Read a target's current version like the preflight reads optional
+	 * targets: an absent file or a missing optional value on an `ifPresent`
+	 * `wordpress-stable-tag` target reads null, so a stable release of a
+	 * pre-release current version skips its planned edit instead of failing
+	 * on the optional readme.
+	 *
+	 * @return string|null The current version, or null for an absent optional target.
+	 */
+	public function read_optional_current( array $source, ?array $package = null ): ?string {
+		if ( ( $source['kind'] ?? '' ) === 'git-tag' ) {
+			return $this->read_current( $source, $package );
+		}
+
+		$optional = ! empty( $source['ifPresent'] ) && 'wordpress-stable-tag' === ( $source['kind'] ?? '' );
+		$file = $this->file( $source, $optional );
+
+		if ( null === $file ) {
+			return null;
+		}
+
+		$contents = $this->contents( $file );
+		$match = $this->locate( $contents, $source );
+
+		if ( null === $match ) {
+			if ( $optional ) {
+				return null;
+			}
+
 			throw new Release_Exception( 'Version is missing from ' . $file . '.' );
 		}
 
@@ -145,7 +193,43 @@ final class Version_Files {
 	}
 
 	/**
+	 * The version spans of the tags sharing a prefix, like the tags of one
+	 * package under its expanded tag format.
+	 *
 	 * @return string[]
+	 */
+	public function tagged_versions( string $prefix ): array {
+		$versions = [];
+
+		foreach ( $this->tags() as $tag ) {
+			if ( 0 === strpos( $tag, $prefix ) ) {
+				$versions[] = substr( $tag, strlen( $prefix ) );
+			}
+		}
+
+		return $versions;
+	}
+
+	/**
+	 * Expand the {name} and {path} placeholders of a git tag pattern with the
+	 * package you're reading the version for, keeping {version} for the regex.
+	 * Without a package, the pattern expands like a package at the root.
+	 */
+	private function package_pattern( $pattern, ?array $package ): string {
+		if ( ! is_string( $pattern ) ) {
+			throw new Release_Exception( 'A tag pattern must be a string.' );
+		}
+
+		$package = $package ?? [
+			'name' => '',
+			'path' => '.',
+		];
+
+		return $this->tag_format->format( $pattern, $package, '{version}' );
+	}
+
+	/**
+	 * @return string[] The git tags of the canonical project root.
 	 */
 	private function tags(): array {
 		$root = $this->files->get_root();
@@ -179,6 +263,12 @@ final class Version_Files {
 	private function file( array $descriptor, bool $optional ): ?string {
 		$base = $this->files->get_root();
 		$name = $descriptor['file'] ?? null;
+
+		// The theme stylesheet header resolves to style.css without a file setting,
+		// like the readme Stable tag resolves to readme.txt.
+		if ( 'wordpress-theme-header' === ( $descriptor['kind'] ?? '' ) && null === $name ) {
+			$name = 'style.css';
+		}
 
 		if ( ! is_string( $name ) || '' === $name || '/' === $name[0] || false !== strpos( $name, "\0" ) ) {
 			throw new Release_Exception( 'Invalid version file path.' );
@@ -263,7 +353,7 @@ final class Version_Files {
 			return $this->json_version( $contents );
 		}
 
-		if ( 'wordpress-plugin-header' === $kind || 'wordpress-stable-tag' === $kind ) {
+		if ( in_array( $kind, [ 'wordpress-plugin-header', 'wordpress-theme-header', 'wordpress-stable-tag' ], true ) ) {
 			$label = 'wordpress-stable-tag' === $kind ? 'Stable tag' : 'Version';
 			$expression = '/^[\t ]*(?:(?:\/\/|\/\*|\*)[\t ]*)?' . preg_quote( $label, '/' ) . ':[\t ]*\K[^\s*]+/mi';
 		} elseif ( 'php-constant' === $kind ) {

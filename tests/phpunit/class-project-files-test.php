@@ -2,7 +2,10 @@
 
 namespace WPElevator\PHP_Changesets_Tests;
 
+use FilesystemIterator;
 use PHPUnit\Framework\TestCase;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 use WPElevator\PHP_Changesets\Project_Files;
 use WPElevator\PHP_Changesets\Release_Exception;
 
@@ -18,9 +21,16 @@ final class Project_Files_Test extends TestCase {
 	}
 
 	protected function tearDown(): void {
-		foreach ( scandir( $this->directory ) as $name ) {
-			if ( '.' !== $name && '..' !== $name ) {
-				unlink( $this->directory . '/' . $name );
+		$iterator = new RecursiveIteratorIterator(
+			new RecursiveDirectoryIterator( $this->directory, FilesystemIterator::SKIP_DOTS ),
+			RecursiveIteratorIterator::CHILD_FIRST
+		);
+
+		foreach ( $iterator as $item ) {
+			if ( $item->isDir() && ! $item->isLink() ) {
+				rmdir( $item->getPathname() );
+			} else {
+				unlink( $item->getPathname() );
 			}
 		}
 
@@ -56,5 +66,39 @@ final class Project_Files_Test extends TestCase {
 		$this->expectException( Release_Exception::class );
 
 		$files->resolve( 'linked/outside' );
+	}
+
+	public function test_package_resolves_relative_to_the_package_directory(): void {
+		mkdir( $this->directory . '/packages' );
+		mkdir( $this->directory . '/packages/alpha' );
+		$files = new Project_Files( $this->directory );
+		$package = $files->package( 'packages/alpha' );
+
+		$this->assertSame( $this->directory . '/packages/alpha/HEADER.md', $package->resolve( 'HEADER.md' ), 'A package resolver resolves paths inside its own root.' );
+	}
+
+	public function test_missing_package_directories_are_rejected(): void {
+		$files = new Project_Files( $this->directory );
+
+		$this->expectException( Release_Exception::class );
+
+		$files->package( 'packages/missing' );
+	}
+
+	public function test_package_paths_must_stay_inside_the_project(): void {
+		$files = new Project_Files( $this->directory );
+
+		$this->expectException( Release_Exception::class );
+
+		$files->package( '../outside' );
+	}
+
+	public function test_symlinked_package_directories_are_rejected(): void {
+		symlink( $this->directory, $this->directory . '/linked' );
+		$files = new Project_Files( $this->directory );
+
+		$this->expectException( Release_Exception::class );
+
+		$files->package( 'linked' );
 	}
 }

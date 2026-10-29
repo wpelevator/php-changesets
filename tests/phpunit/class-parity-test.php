@@ -41,13 +41,55 @@ final class Parity_Test extends TestCase {
 		}
 
 		$this->success( [ 'git', 'init', '-q' ] );
-		file_put_contents( $this->root . '/composer.json', "{\"name\":\"example/library\",\"version\":\"0.2.7\"}\n" );
-		$this->success( [ 'git', 'add', 'composer.json' ] );
-		$this->success( [ 'git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'Initial' ] );
+		$this->success( [ 'git', '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'Initial' ] );
+
+		mkdir( $this->root . '/packages/alpha', 0777, true );
+		mkdir( $this->root . '/packages/beta', 0777, true );
+		file_put_contents( $this->root . '/packages/alpha/composer.json', "{\"name\":\"example/alpha\",\"version\":\"0.2.7\"}\n" );
+		file_put_contents( $this->root . '/packages/beta/composer.json', "{\"name\":\"example/beta\",\"version\":\"1.0.0\"}\n" );
+
+		file_put_contents(
+			$this->root . '/changesets.config.php',
+			<<<'PHP'
+<?php
+
+return \WPElevator\PHP_Changesets\define_config( [
+	'tagFormat' => '{name}-v{version}',
+	'packages' => [
+		[
+			'glob' => 'packages/*',
+			'idFrom' => 'composer.json#name',
+			'version' => [
+				'from' => \WPElevator\PHP_Changesets\composer_json_version(),
+				'to' => [],
+			],
+		],
+	],
+] );
+PHP
+		);
+		file_put_contents(
+			$this->root . '/wp-release.config.mjs',
+			<<<'MJS'
+export default {
+	tagFormat: '{name}-v{version}',
+	packages: [
+		{
+			glob: 'packages/*',
+			idFrom: 'composer.json#name',
+			version: {
+				from: { kind: 'composer-json', file: 'composer.json', field: 'version' },
+				to: [],
+			},
+		},
+	],
+};
+MJS
+		);
 
 		mkdir( $this->root . '/.changeset' );
-		file_put_contents( $this->root . '/.changeset/z-fix.md', "---\nexample/library: patch\n---\n\nFix a defect.\n" );
-		file_put_contents( $this->root . '/.changeset/a-feature.md', "---\n\"example/library\": minor\n---\n\nAdd a feature.\n" );
+		file_put_contents( $this->root . '/.changeset/z-fix.md', "---\n\"example/alpha\": patch\n\"example/beta\": patch\n---\n\nFix a defect.\n" );
+		file_put_contents( $this->root . '/.changeset/a-feature.md', "---\n\"example/alpha\": minor\n---\n\nAdd a feature.\n" );
 		file_put_contents( $this->root . '/.changeset/empty.md', "---\n---\n" );
 
 		$php = json_decode( $this->success( [ PHP_BINARY, dirname( __DIR__, 2 ) . '/bin/changesets', 'status', '--root', $this->root, '--json' ] ), true );
@@ -55,23 +97,46 @@ final class Parity_Test extends TestCase {
 
 		$this->assertIsArray( $php, 'PHP status should return JSON.' );
 		$this->assertIsArray( $node, 'Node status should return JSON.' );
-		$this->assertCount( 1, $node['releases'], 'The shared fixture should plan one Node release.' );
+		$this->assertCount( 2, $node['releases'], 'The shared fixture should plan one release per package.' );
 
-		$release = $node['releases'][0];
-
-		$this->assertSame(
-			[ $php['project'], $php['currentVersion'], $php['bump'], $php['nextVersion'] ],
-			[ $release['package'], $release['currentVersion'], $release['bump'], $release['nextVersion'] ],
-			'Both CLIs should select the same project, current version, highest bump, and next version.'
+		$php_releases = array_map(
+			static fn( array $release ): array => [
+				$release['package'],
+				$release['currentVersion'],
+				$release['bump'],
+				$release['nextVersion'],
+			],
+			$php['releases']
+		);
+		$node_releases = array_map(
+			static fn( array $release ): array => [
+				$release['package'],
+				$release['currentVersion'],
+				$release['bump'],
+				$release['nextVersion'],
+			],
+			$node['releases']
 		);
 
-		$php_changesets = array_map( static fn( array $item ): array => [ $item['name'], $item['summary'] ], $php['changesets'] );
-		$node_changesets = array_map( static fn( array $item ): array => [ $item['fileName'], $item['summary'] ], $node['changesets'] );
+		$this->assertSame(
+			$node_releases,
+			$php_releases,
+			'Both CLIs should plan the same packages, current versions, highest bumps, and next versions in group order.'
+		);
+
+		$php_changesets = array_map(
+			static fn( array $item ): array => [ $item['file'], $item['packages'], $item['summary'] ],
+			$php['changesets']
+		);
+		$node_changesets = array_map(
+			static fn( array $item ): array => [ $item['fileName'], $item['packages'], $item['summary'] ],
+			$node['changesets']
+		);
 
 		$this->assertSame(
-			$php_changesets,
 			$node_changesets,
-			'Both CLIs should return changeset file names and summaries in the same order, including empty changesets.'
+			$php_changesets,
+			'Both CLIs should return changeset file names, package mappings, and summaries in the same order, including empty changesets.'
 		);
 	}
 

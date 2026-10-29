@@ -9,6 +9,9 @@
 	"autoload": {
 		"classmap": [
 			"php/"
+		],
+		"files": [
+			"php/functions.php"
 		]
 	},
 	"bin": [
