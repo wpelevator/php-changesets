@@ -1,8 +1,13 @@
 <?php
 
-declare(strict_types=1);
+namespace WPElevator\PHP_Changesets_Tests;
 
+use FilesystemIterator;
 use PHPUnit\Framework\TestCase;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+use ReflectionMethod;
+use WPElevator\PHP_Changesets\Project_Files;
 use WPElevator\PHP_Changesets\Release_Exception;
 use WPElevator\PHP_Changesets\Version_Files;
 
@@ -12,13 +17,20 @@ final class Version_Files_Test extends TestCase {
 
 	private string $directory;
 
+	private Version_Files $versions;
+
 	protected function setUp(): void {
 		$this->directory = sys_get_temp_dir() . '/version-files-' . bin2hex( random_bytes( 8 ) );
 		mkdir( $this->directory );
+		$this->versions = new Version_Files( new Project_Files( $this->directory ) );
 	}
 
 	protected function tearDown(): void {
-		$iterator = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $this->directory, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::CHILD_FIRST );
+		$iterator = new RecursiveIteratorIterator(
+			new RecursiveDirectoryIterator( $this->directory, FilesystemIterator::SKIP_DOTS ),
+			RecursiveIteratorIterator::CHILD_FIRST
+		);
+
 		foreach ( $iterator as $entry ) {
 			if ( $entry->isDir() && ! $entry->isLink() ) {
 				rmdir( $entry->getPathname() );
@@ -26,18 +38,37 @@ final class Version_Files_Test extends TestCase {
 				unlink( $entry->getPathname() );
 			}
 		}
+
 		rmdir( $this->directory );
 	}
 
-	public function testComposerEditPreservesFormattingAndNestedFields(): void {
+	public function test_propose_parameter_names_use_snake_case(): void {
+		$method = new ReflectionMethod( Version_Files::class, 'propose' );
+		$names = array_map(
+			static fn( \ReflectionParameter $parameter ): string => $parameter->getName(),
+			$method->getParameters()
+		);
+
+		$this->assertSame(
+			[ 'target', 'old_version', 'new_version', 'contents_override' ],
+			$names,
+			'Version proposals use snake_case public parameter names.'
+		);
+	}
+
+	public function test_composer_edit_preserves_formatting_and_nested_fields(): void {
 		$old = "{\n  \"extra\": {\"version\": \"nested\"},\n  \"version\": \"1.2.3\"\n}\n";
 		file_put_contents( $this->directory . '/composer.json', $old );
-		$descriptor = array(
+
+		$descriptor = [
 			'kind' => 'composer-json',
 			'file' => 'composer.json',
-		);
-		$this->assertSame( '1.2.3', Version_Files::readCurrent( $this->directory, $descriptor ), 'The top-level Composer version is the source.' );
-		$proposal = Version_Files::propose( $this->directory, $descriptor, '1.2.3', '1.3.0' );
+		];
+
+		$this->assertSame( '1.2.3', $this->versions->read_current( $descriptor ), 'The top-level Composer version is the source.' );
+
+		$proposal = $this->versions->propose( $descriptor, '1.2.3', '1.3.0' );
+
 		$this->assertSame( str_replace( '"1.2.3"', '"1.3.0"', $old ), $proposal['new'], 'Only the version value changes.' );
 		$this->assertSame( $old, file_get_contents( $proposal['path'] ), 'Proposing a change does not write the file.' );
 	}
@@ -45,121 +76,147 @@ final class Version_Files_Test extends TestCase {
 	public function test_callback_resolver_rejects_an_invalid_span(): void {
 		$contents = "Version: 1.2.3\n";
 		file_put_contents( $this->directory . '/version.txt', $contents );
-		$descriptor = array(
+
+		$descriptor = [
 			'kind' => 'callback',
 			'file' => 'version.txt',
-			'resolve' => static fn( string $text ): array => array(
+			'resolve' => static fn( string $text ): array => [
 				'value' => '1.2.3',
 				'offset' => 0,
 				'length' => 5,
-			),
-		);
+			],
+		];
+
 		$this->expectException( Release_Exception::class );
-		Version_Files::propose( $this->directory, $descriptor, '1.2.3', '1.2.4' );
+
+		$this->versions->propose( $descriptor, '1.2.3', '1.2.4' );
 	}
 
-	public function testHeaderAndConstantEditsPreserveSurroundingText(): void {
-		file_put_contents( $this->directory . '/plugin.php', "<?php\n/*\n * Version: 1.2.3  \n */\n// const PLUGIN_VERSION = '0.0.1';\ndefine('PLUGIN_VERSION', '1.2.3');\n" );
-		foreach ( array(
-			array(
+	public function test_header_and_constant_edits_preserve_surrounding_text(): void {
+		file_put_contents(
+			$this->directory . '/plugin.php',
+			"<?php\n/*\n * Version: 1.2.3  \n */\n// const PLUGIN_VERSION = '0.0.1';\ndefine('PLUGIN_VERSION', '1.2.3');\n"
+		);
+
+		$descriptors = [
+			[
 				'kind' => 'wordpress-plugin-header',
 				'file' => 'plugin.php',
-			),
-			array(
+			],
+			[
 				'kind' => 'php-constant',
 				'file' => 'plugin.php',
 				'constant' => 'PLUGIN_VERSION',
-			),
-		) as $descriptor ) {
-			$proposal = Version_Files::propose( $this->directory, $descriptor, '1.2.3', '2.0.0' );
+			],
+		];
+
+		foreach ( $descriptors as $descriptor ) {
+			$proposal = $this->versions->propose( $descriptor, '1.2.3', '2.0.0' );
+
 			$this->assertSame( 1, substr_count( $proposal['new'], '2.0.0' ), 'Exactly one version value is replaced.' );
 			$this->assertStringContainsString( "// const PLUGIN_VERSION = '0.0.1';", $proposal['new'], 'Comments remain unchanged.' );
 		}
 	}
 
-	public function testWordPressCommentHeaderForms(): void {
-		foreach ( array( "// Version: 1.2.3\n", " * Version: 1.2.3*/\n", "/* Version: 1.2.3*/\n", "Stable tag: 1.2.3\n", "// Stable tag: 1.2.3*/\n" ) as $contents ) {
+	public function test_wordpress_comment_header_forms(): void {
+		$fixtures = [
+			"// Version: 1.2.3\n",
+			" * Version: 1.2.3*/\n",
+			"/* Version: 1.2.3*/\n",
+			"Stable tag: 1.2.3\n",
+			"// Stable tag: 1.2.3*/\n",
+		];
+
+		foreach ( $fixtures as $contents ) {
 			file_put_contents( $this->directory . '/version.txt', $contents );
-			$descriptor = array(
+
+			$descriptor = [
 				'kind' => str_contains( $contents, 'Stable tag' ) ? 'wordpress-stable-tag' : 'wordpress-plugin-header',
 				'file' => 'version.txt',
-			);
-			$this->assertSame( '1.2.3', Version_Files::readCurrent( $this->directory, $descriptor ), 'The version excludes comment delimiters.' );
-			$proposal = Version_Files::propose( $this->directory, $descriptor, '1.2.3', '1.2.4' );
+			];
+
+			$this->assertSame( '1.2.3', $this->versions->read_current( $descriptor ), 'The version excludes comment delimiters.' );
+
+			$proposal = $this->versions->propose( $descriptor, '1.2.3', '1.2.4' );
+
 			$this->assertSame( str_replace( '1.2.3', '1.2.4', $contents ), $proposal['new'], 'The comment delimiters are preserved in the proposal.' );
 		}
 	}
 
-	public function testCodeBeforeHeaderIsNotAHeader(): void {
+	public function test_code_before_header_is_not_a_header(): void {
 		file_put_contents( $this->directory . '/plugin.php', "<?php echo 'Version: 1.2.3';\n" );
+
 		$this->expectException( Release_Exception::class );
-		Version_Files::readCurrent(
-			$this->directory,
-			array(
+
+		$this->versions->read_current(
+			[
 				'kind' => 'wordpress-plugin-header',
 				'file' => 'plugin.php',
-			)
+			]
 		);
 	}
 
-	public function testTargetsInOneFileCanBeComposed(): void {
+	public function test_targets_in_one_file_can_be_composed(): void {
 		$contents = "<?php\n/*\n * Version: 1.2.3\n */\nconst PLUGIN_VERSION = '1.2.3';\n";
 		file_put_contents( $this->directory . '/plugin.php', $contents );
-		$header = array(
+
+		$header = [
 			'kind' => 'wordpress-plugin-header',
 			'file' => 'plugin.php',
-		);
-		$constant = array(
+		];
+		$constant = [
 			'kind' => 'php-constant',
 			'file' => 'plugin.php',
 			'constant' => 'PLUGIN_VERSION',
-		);
-		$first = Version_Files::propose( $this->directory, $header, '1.2.3', '1.2.4' );
-		$second = Version_Files::propose( $this->directory, $constant, '1.2.3', '1.2.4', $first['new'] );
+		];
+
+		$first = $this->versions->propose( $header, '1.2.3', '1.2.4' );
+		$second = $this->versions->propose( $constant, '1.2.3', '1.2.4', $first['new'] );
+
 		$this->assertSame( $first['new'], $second['old'], 'The second proposal uses the first proposed contents.' );
 		$this->assertSame( str_replace( '1.2.3', '1.2.4', $contents ), $second['new'], 'Both version targets are included in the final proposal.' );
 		$this->assertSame( $contents, file_get_contents( $first['path'] ), 'Composing proposals leaves the original file unchanged.' );
 	}
 
-	public function testConstantLikeTextInsideStringsIsIgnored(): void {
+	public function test_constant_like_text_inside_strings_is_ignored(): void {
 		$contents = "<?php\n\$example = \"const PLUGIN_VERSION = '0.0.1';\";\nconst PLUGIN_VERSION = '1.2.3';\n";
 		file_put_contents( $this->directory . '/plugin.php', $contents );
-		$proposal = Version_Files::propose(
-			$this->directory,
-			array(
+
+		$proposal = $this->versions->propose(
+			[
 				'kind' => 'php-constant',
 				'file' => 'plugin.php',
 				'constant' => 'PLUGIN_VERSION',
-			),
+			],
 			'1.2.3',
 			'1.2.4'
 		);
+
 		$this->assertSame( str_replace( "'1.2.3'", "'1.2.4'", $contents ), $proposal['new'], 'Only the actual PHP declaration is changed.' );
 	}
 
-	public function testOptionalMissingTargets(): void {
+	public function test_optional_missing_targets(): void {
 		file_put_contents( $this->directory . '/composer.json', '{}' );
+
 		$this->assertNull(
-			Version_Files::propose(
-				$this->directory,
-				array(
+			$this->versions->propose(
+				[
 					'kind' => 'composer-json',
 					'file' => 'composer.json',
 					'ifPresent' => true,
-				),
+				],
 				'1.0.0',
 				'1.0.1'
 			),
 			'An optional absent Composer version is skipped.'
 		);
 		$this->assertNull(
-			Version_Files::propose(
-				$this->directory,
-				array(
+			$this->versions->propose(
+				[
 					'kind' => 'wordpress-stable-tag',
 					'file' => 'readme.txt',
 					'ifPresent' => true,
-				),
+				],
 				'1.0.0',
 				'1.0.1'
 			),
@@ -167,91 +224,111 @@ final class Version_Files_Test extends TestCase {
 		);
 	}
 
-	public function testDuplicateVersionIsRejected(): void {
+	public function test_duplicate_version_is_rejected(): void {
 		file_put_contents( $this->directory . '/composer.json', '{"version":"1.0.0","version":"1.0.0"}' );
+
 		$this->expectException( Release_Exception::class );
-		Version_Files::propose(
-			$this->directory,
-			array(
+
+		$this->versions->propose(
+			[
 				'kind' => 'composer-json',
 				'file' => 'composer.json',
-			),
+			],
 			'1.0.0',
 			'1.0.1'
 		);
 	}
 
-	public function testEscapingSymlinkIsRejected(): void {
+	public function test_escaping_symlink_is_rejected(): void {
 		symlink( sys_get_temp_dir(), $this->directory . '/outside' );
+
 		$this->expectException( Release_Exception::class );
-		Version_Files::propose(
-			$this->directory,
-			array(
+
+		$this->versions->propose(
+			[
 				'kind' => 'wordpress-stable-tag',
 				'file' => 'outside/missing.txt',
 				'ifPresent' => true,
-			),
+			],
 			'1.0.0',
 			'1.0.1'
 		);
 	}
 
-	public function testGitTagInitialVersionFallbackAndPrecedence(): void {
-		$process = proc_open( array( 'git', 'init', '-q', $this->directory ), array( array( 'pipe', 'r' ), array( 'pipe', 'w' ), array( 'pipe', 'w' ) ), $pipes );
-		foreach ( $pipes as $pipe ) {
-			fclose( $pipe );
-		}
-		$this->assertSame( 0, proc_close( $process ), 'The temporary repository is initialized.' );
-		$source = array(
-			'kind' => 'git-tag',
-			'initialVersion' => '1.0.0',
-		);
-		$this->assertSame( '1.0.0', Version_Files::readCurrent( $this->directory, $source ), 'The explicit initial version is used when no matching tag exists.' );
-		file_put_contents( $this->directory . '/.git/refs/tags/v1.2.0', str_repeat( 'a', 40 ) . "\n" );
-		$this->assertSame( '1.2.0', Version_Files::readCurrent( $this->directory, $source ), 'A matching stable tag takes precedence over the initial version.' );
-	}
-
-	public function testInvalidGitTagInitialVersionFails(): void {
-		$this->expectException( Release_Exception::class );
-		Version_Files::readCurrent(
-			$this->directory,
-			array(
-				'kind' => 'git-tag',
-				'initialVersion' => '01.0.0',
-			)
-		);
-	}
-
-	public function testStableTagsAreSortedAndMatchedExactly(): void {
+	public function test_git_tag_initial_version_fallback_and_precedence(): void {
 		$process = proc_open(
-			array( 'git', 'init', '-q', $this->directory ),
-			array(
-				0 => array( 'pipe', 'r' ),
-				1 => array( 'pipe', 'w' ),
-				2 => array( 'pipe', 'w' ),
-			),
+			[ 'git', 'init', '-q', $this->directory ],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'pipe', 'w' ],
+			],
 			$pipes
 		);
+
 		foreach ( $pipes as $pipe ) {
 			fclose( $pipe );
 		}
+
 		$this->assertSame( 0, proc_close( $process ), 'The temporary repository is initialized.' );
+
+		$source = [
+			'kind' => 'git-tag',
+			'initialVersion' => '1.0.0',
+		];
+
+		$this->assertSame( '1.0.0', $this->versions->read_current( $source ), 'The explicit initial version is used when no matching tag exists.' );
+
+		file_put_contents( $this->directory . '/.git/refs/tags/v1.2.0', str_repeat( 'a', 40 ) . "\n" );
+
+		$this->assertSame( '1.2.0', $this->versions->read_current( $source ), 'A matching stable tag takes precedence over the initial version.' );
+	}
+
+	public function test_invalid_git_tag_initial_version_fails(): void {
+		$this->expectException( Release_Exception::class );
+
+		$this->versions->read_current(
+			[
+				'kind' => 'git-tag',
+				'initialVersion' => '01.0.0',
+			]
+		);
+	}
+
+	public function test_stable_tags_are_sorted_and_matched_exactly(): void {
+		$process = proc_open(
+			[ 'git', 'init', '-q', $this->directory ],
+			[
+				0 => [ 'pipe', 'r' ],
+				1 => [ 'pipe', 'w' ],
+				2 => [ 'pipe', 'w' ],
+			],
+			$pipes
+		);
+
+		foreach ( $pipes as $pipe ) {
+			fclose( $pipe );
+		}
+
+		$this->assertSame( 0, proc_close( $process ), 'The temporary repository is initialized.' );
+
 		mkdir( $this->directory . '/.git/refs/tags/releases' );
-		foreach ( array( 'v1.9.0', 'v1.10.0', 'v2.0.0-rc.1' ) as $tag ) {
+
+		foreach ( [ 'v1.9.0', 'v1.10.0', 'v2.0.0-rc.1' ] as $tag ) {
 			file_put_contents( $this->directory . '/.git/refs/tags/releases/' . $tag, str_repeat( 'a', 40 ) . "\n" );
 		}
+
 		$this->assertSame(
 			'1.10.0',
-			Version_Files::readCurrent(
-				$this->directory,
-				array(
+			$this->versions->read_current(
+				[
 					'kind' => 'git-tag',
 					'pattern' => 'releases/v{version}',
-				)
+				]
 			),
 			'The latest stable semantic version wins.'
 		);
-		$this->assertTrue( Version_Files::tagExists( $this->directory, 'releases/v1.9.0' ), 'An exact existing tag is found.' );
-		$this->assertFalse( Version_Files::tagExists( $this->directory, 'releases/*' ), 'A wildcard is not treated as an exact tag.' );
+		$this->assertTrue( $this->versions->tag_exists( 'releases/v1.9.0' ), 'An exact existing tag is found.' );
+		$this->assertFalse( $this->versions->tag_exists( 'releases/*' ), 'A wildcard is not treated as an exact tag.' );
 	}
 }

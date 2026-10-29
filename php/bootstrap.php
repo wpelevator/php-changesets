@@ -1,8 +1,7 @@
 <?php
 
-declare(strict_types=1);
-
 require_once __DIR__ . '/class-release-exception.php';
+require_once __DIR__ . '/class-project-files.php';
 require_once __DIR__ . '/class-changeset-reader.php';
 require_once __DIR__ . '/class-version-planner.php';
 require_once __DIR__ . '/class-version-files.php';

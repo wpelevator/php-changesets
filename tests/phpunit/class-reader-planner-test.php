@@ -1,8 +1,9 @@
 <?php
 
-declare(strict_types=1);
+namespace WPElevator\PHP_Changesets_Tests;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
 use WPElevator\PHP_Changesets\Changeset_Reader;
 use WPElevator\PHP_Changesets\Release_Exception;
 use WPElevator\PHP_Changesets\Version_Planner;
@@ -24,19 +25,30 @@ final class Reader_Planner_Test extends TestCase {
 				unlink( $this->directory . '/' . $name );
 			}
 		}
+
 		rmdir( $this->directory );
 	}
 
-	public function testReadsSortedRecordsAndPlansHighestBump(): void {
+	public function test_public_parameter_names_use_snake_case(): void {
+		$reader = new ReflectionMethod( Changeset_Reader::class, 'read' );
+		$planner = new ReflectionMethod( Version_Planner::class, 'plan' );
+
+		$this->assertSame( 'project_name', $reader->getParameters()[1]->getName(), 'The reader uses a snake_case public parameter name.' );
+		$this->assertSame( 'current_version', $planner->getParameters()[0]->getName(), 'The planner uses a snake_case public parameter name.' );
+	}
+
+	public function test_reads_sorted_records_and_plans_highest_bump(): void {
 		file_put_contents( $this->directory . '/z.md', "---\n'example/project': patch\n---\n\nPatch note.\n" );
 		file_put_contents( $this->directory . '/a.md', "---\n\"example/project\": minor\n---\n\nMinor note.\n" );
 		file_put_contents( $this->directory . '/empty.md', "---\n---\n" );
 		file_put_contents( $this->directory . '/README.md', 'Ignored' );
+
 		$records = ( new Changeset_Reader() )->read( $this->directory, 'example/project' );
-		self::assertSame( [ 'a.md', 'empty.md', 'z.md' ], array_column( $records, 'name' ), 'Changesets should be ordered by file name and ignore README.md.' );
-		self::assertSame( realpath( $this->directory ) . '/a.md', $records[0]['file'], 'Each record should identify its absolute file path.' );
-		self::assertNull( $records[1]['bump'], 'Empty frontmatter should record no release.' );
-		self::assertSame(
+
+		$this->assertSame( [ 'a.md', 'empty.md', 'z.md' ], array_column( $records, 'name' ), 'Changesets should be ordered by file name and ignore README.md.' );
+		$this->assertSame( realpath( $this->directory ) . '/a.md', $records[0]['file'], 'Each record should identify its absolute file path.' );
+		$this->assertNull( $records[1]['bump'], 'Empty frontmatter should record no release.' );
+		$this->assertSame(
 			[
 				'bump' => 'minor',
 				'nextVersion' => '0.3.0',
@@ -56,25 +68,29 @@ final class Reader_Planner_Test extends TestCase {
 		);
 	}
 
-	public function testReadsEscapedDoubleQuoteInProjectName(): void {
+	public function test_reads_escaped_double_quote_in_project_name(): void {
 		file_put_contents( $this->directory . '/quoted.md', "---\n\"example/quoted\\\"name\": patch\n---\nNote\n" );
+
 		$records = ( new Changeset_Reader() )->read( $this->directory, 'example/quoted"name' );
-		self::assertSame( 'patch', $records[0]['bump'], 'An escaped double quote should match the corresponding project name.' );
+
+		$this->assertSame( 'patch', $records[0]['bump'], 'An escaped double quote should match the corresponding project name.' );
 	}
 
-
-	public function testMissingDirectoryHasNoChangesets(): void {
+	public function test_missing_directory_has_no_changesets(): void {
 		$records = ( new Changeset_Reader() )->read( $this->directory . '/missing', 'example/project' );
-		self::assertSame( [], $records, 'A project without a changeset directory should have no pending changesets.' );
+
+		$this->assertSame( [], $records, 'A project without a changeset directory should have no pending changesets.' );
 	}
 
-	public function testRejectsDanglingDirectorySymlink(): void {
+	public function test_rejects_dangling_directory_symlink(): void {
 		symlink( $this->directory . '/missing', $this->directory . '/linked' );
+
 		$this->expectException( Release_Exception::class );
+
 		( new Changeset_Reader() )->read( $this->directory . '/linked', 'example/project' );
 	}
 
-	public function testEmptyChangesetsDoNotBump(): void {
+	public function test_empty_changesets_do_not_bump(): void {
 		$plan = ( new Version_Planner() )->plan(
 			'1.2.3',
 			[
@@ -85,7 +101,8 @@ final class Reader_Planner_Test extends TestCase {
 				],
 			]
 		);
-		self::assertSame(
+
+		$this->assertSame(
 			[
 				'bump' => null,
 				'nextVersion' => '1.2.3',
@@ -96,14 +113,18 @@ final class Reader_Planner_Test extends TestCase {
 		);
 	}
 
-	/** @dataProvider invalidChangesets */
-	public function testRejectsInvalidChangesets( string $contents ): void {
+	/**
+	 * @dataProvider invalid_changesets
+	 */
+	public function test_rejects_invalid_changesets( string $contents ): void {
 		file_put_contents( $this->directory . '/bad.md', $contents );
+
 		$this->expectException( Release_Exception::class );
+
 		( new Changeset_Reader() )->read( $this->directory, 'example/project' );
 	}
 
-	public static function invalidChangesets(): array {
+	public static function invalid_changesets(): array {
 		return [
 			[ 'missing frontmatter' ],
 			[ "---\nexample/project: patch\n" ],
@@ -116,19 +137,24 @@ final class Reader_Planner_Test extends TestCase {
 		];
 	}
 
-	public function testRejectsSymlinkedChangeset(): void {
+	public function test_rejects_symlinked_changeset(): void {
 		symlink( __FILE__, $this->directory . '/linked.md' );
+
 		$this->expectException( Release_Exception::class );
+
 		( new Changeset_Reader() )->read( $this->directory, 'example/project' );
 	}
 
-	/** @dataProvider invalidVersions */
-	public function testRejectsNonStableVersions( string $version ): void {
+	/**
+	 * @dataProvider invalid_versions
+	 */
+	public function test_rejects_non_stable_versions( string $version ): void {
 		$this->expectException( Release_Exception::class );
+
 		( new Version_Planner() )->plan( $version, [] );
 	}
 
-	public static function invalidVersions(): array {
+	public static function invalid_versions(): array {
 		return [ [ '1.2' ], [ '01.2.3' ], [ '1.2.3-rc.1' ], [ 'v1.2.3' ] ];
 	}
 }
