@@ -3,16 +3,22 @@
 namespace WPElevator\PHP_Changesets;
 
 /**
- * Read the supported single-project changeset format from a safe directory.
+ * Read the supported multi-package changeset format from a safe directory.
+ *
+ * Frontmatter is a mapping of package name to patch|minor|major bump; one
+ * changeset may name several packages, and empty frontmatter records an
+ * explicit no-release changeset that is consumed for every package.
  */
 final class Changeset_Reader {
 
 	/**
-	 * Read changesets ordered by filename.
+	 * Read changesets ordered by filename, validating package names against
+	 * the discovered packages.
 	 *
-	 * @return array<int, array{file: string, name: string, bump: string|null, summary: string}>
+	 * @param string[] $package_names Discovered package names.
+	 * @return array<int, array{file: string, name: string, packages: array<string, string>, summary: string}>
 	 */
-	public function read( string $directory, string $project_name ): array {
+	public function read( string $directory, array $package_names ): array {
 		$this->assert_safe_directory( $directory );
 
 		if ( ! file_exists( $directory ) ) {
@@ -34,7 +40,8 @@ final class Changeset_Reader {
 		$records = [];
 
 		foreach ( $names as $name ) {
-			if ( 'README.md' !== $name && '.md' === substr( $name, -3 ) ) {
+			// Every Markdown file is a changeset except the reserved README ones.
+			if ( '.md' === substr( $name, -3 ) && 'README' !== substr( $name, 0, 6 ) ) {
 				$path = $root . DIRECTORY_SEPARATOR . $name;
 
 				if ( is_link( $path ) || ! is_file( $path ) || ! is_readable( $path ) ) {
@@ -47,31 +54,18 @@ final class Changeset_Reader {
 					throw new Release_Exception( "Cannot read changeset file: $path" );
 				}
 
-				$records[] = $this->parse( $contents, $path, $name, $project_name );
+				$records[] = $this->parse( $contents, $path, $name, $package_names );
 			}
 		}
 
 		return $records;
 	}
 
-	private function assert_safe_directory( string $directory ): void {
-		$path = 0 === strpos( $directory, DIRECTORY_SEPARATOR ) ? DIRECTORY_SEPARATOR : getcwd() . DIRECTORY_SEPARATOR;
-
-		foreach ( explode( DIRECTORY_SEPARATOR, $directory ) as $part ) {
-			if ( '' !== $part && '.' !== $part ) {
-				$path .= $part . DIRECTORY_SEPARATOR;
-
-				if ( is_link( rtrim( $path, DIRECTORY_SEPARATOR ) ) ) {
-					throw new Release_Exception( "Changeset directory contains a symlink: $directory" );
-				}
-			}
-		}
-	}
-
 	/**
-	 * @return array{file: string, name: string, bump: string|null, summary: string}
+	 * @param string[] $package_names
+	 * @return array{file: string, name: string, packages: array<string, string>, summary: string}
 	 */
-	private function parse( string $contents, string $path, string $name, string $project_name ): array {
+	private function parse( string $contents, string $path, string $name, array $package_names ): array {
 		$contents = preg_replace( '/^\xEF\xBB\xBF/', '', $contents );
 		$lines = preg_split( '/\r\n|\n/', $contents );
 
@@ -86,35 +80,53 @@ final class Changeset_Reader {
 		}
 
 		++$closing;
-		$bump = null;
+		$packages = [];
 
 		foreach ( array_slice( $lines, 1, $closing - 1 ) as $line ) {
 			if ( '' !== trim( $line ) ) {
-				if ( ! preg_match( '/^\s*(?:"((?:[^"\\\\]|\\\\")+)"|\'([^\']+)\'|([A-Za-z0-9_@.\/-]+))\s*:\s*(patch|minor|major)\s*$/D', $line, $matches ) ) {
+				if ( ! preg_match( '/^\s*(?:"((?:[^"\\\\]|\\\\.)+)"|\'([^\']+)\'|([A-Za-z0-9_@.\/-]+))\s*:\s*(patch|minor|major)\s*$/D', $line, $matches ) ) {
 					throw new Release_Exception( "Invalid package bump in changeset $name." );
 				}
 
 				$key = '' !== $matches[1] ? str_replace( '\\"', '"', $matches[1] ) : ( '' !== $matches[2] ? $matches[2] : $matches[3] );
 
-				if ( $project_name !== $key || null !== $bump ) {
-					throw new Release_Exception( "Unknown or duplicate package in changeset $name: $key" );
+				if ( isset( $packages[ $key ] ) ) {
+					throw new Release_Exception( "Duplicate package in changeset $name: $key" );
 				}
 
-				$bump = $matches[4];
+				if ( ! in_array( $key, $package_names, true ) ) {
+					throw new Release_Exception( "Unknown package in changeset $name: $key" );
+				}
+
+				$packages[ $key ] = $matches[4];
 			}
 		}
 
 		$summary = trim( implode( "\n", array_slice( $lines, $closing + 1 ) ) );
 
-		if ( null !== $bump && '' === $summary ) {
+		if ( [] !== $packages && '' === $summary ) {
 			throw new Release_Exception( "Changeset $name requires a summary." );
 		}
 
 		return [
 			'file' => $path,
 			'name' => $name,
-			'bump' => $bump,
+			'packages' => $packages,
 			'summary' => $summary,
 		];
+	}
+
+	private function assert_safe_directory( string $directory ): void {
+		$path = 0 === strpos( $directory, DIRECTORY_SEPARATOR ) ? DIRECTORY_SEPARATOR : getcwd() . DIRECTORY_SEPARATOR;
+
+		foreach ( explode( DIRECTORY_SEPARATOR, $directory ) as $part ) {
+			if ( '' !== $part && '.' !== $part ) {
+				$path .= $part . DIRECTORY_SEPARATOR;
+
+				if ( is_link( rtrim( $path, DIRECTORY_SEPARATOR ) ) ) {
+					throw new Release_Exception( "Changeset directory contains a symlink: $directory" );
+				}
+			}
+		}
 	}
 }
