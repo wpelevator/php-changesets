@@ -1,5 +1,5 @@
 ---
-title: PHP Changesets
+title: php-changesets
 description: Prepare multi-package releases for PHP projects and monorepos with changeset Markdown files, PHP and Git.
 ---
 
