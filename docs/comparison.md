@@ -4,15 +4,15 @@ title: Comparison with wp-release
 
 ## Comparison with wp-release
 
-PHP Changesets is the PHP counterpart of the `changeset-*` commands of [`wp-release`](../../../js/wp-release/docs/index.md), for projects that release with PHP and Git alone and don't use Node.js or JavaScript. Choose `wp-release` when the project already has a Node.js toolchain, or needs its builds, ZIPs, translations and deploys, and PHP Changesets when Composer is the only package manager. Both read the same changeset files and print the same `releases[]` plan, so a repository can switch between them.
+PHP Changesets is the PHP counterpart of the `changeset` commands of [`wp-release`](../../../js/wp-release/docs/index.md), for projects that release with PHP and Git alone and don't use Node.js or JavaScript. Choose `wp-release` when the project already has a Node.js toolchain, or needs its builds, ZIPs, translations and deploys, and PHP Changesets when Composer is the only package manager. Both read the same changeset files and print the same `releases[]` plan, so a repository can switch between them.
 
 | PHP Changesets | wp-release | Notes |
 | --- | --- | --- |
 | `changeset init` | No equivalent | Scaffolds `changesets.config.php` from the inferred project. |
-| `changeset add` | `changeset-add` | Same options, including `--since` for the changed packages. |
-| `changeset status` | `changeset-status` | Same `--since` check, exit code and result fields. |
-| `changeset version` | `changeset-version` | Same options, without `--no-dependents`. |
-| `changeset tag` | `changeset-tag` | Same options, including `--untagged` and `--push`. |
+| `changeset add` | `changeset add` | Same options, including `--since` for the changed packages. |
+| `changeset status` | `changeset status` | Same `--since` check, exit code and result fields. |
+| `changeset version` | `changeset version` | Same options, without `--no-dependents`. |
+| `changeset tag` | `changeset tag` | Same options, including `--untagged` and `--push`. |
 | `changeset recover` | No equivalent | Restores files after an interrupted release transaction. |
 | `changesets.config.php` | `wp-release.config.mjs` | `define_config()` and the descriptor functions mirror `defineConfig()` and its builders. |
 
@@ -20,7 +20,7 @@ They also share these conventions: `--json` and `--github-output` on every comma
 
 ### Deliberate differences
 
-- The command is `changeset` with subcommands, like `changeset add`, where `wp-release` has `changeset-add` among its other commands. Run `changeset --help` for the commands.
+- `wp-release changeset` without a subcommand runs `changeset add`, so that a package.json script can map `changeset` to it, like the JavaScript Changesets CLI. `changeset` alone prints the usage here. Run `changeset --help` for the commands.
 - No single-project version flags like `--version-composer-json`: without a config, the project is inferred, and `changeset init` writes the inferred settings to `changesets.config.php` to change them.
 - No `changelogInsertAfter`: new `CHANGELOG.md` sections go before the first version heading, and readme sections after the `== Changelog ==` heading.
 - `tag` creates and pushes tags but not GitHub Releases. A workflow step like `softprops/action-gh-release` creates them from its result; see [GitHub Actions](github-actions.md).
