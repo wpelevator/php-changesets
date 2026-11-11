@@ -53,7 +53,7 @@ A changeset's frontmatter maps one or more package names to a `patch`, `minor` o
 Add a feature.
 ```
 
-A single changeset may release several packages by listing one `package: bump` mapping per line, so the frontmatter is a `Record<package name, bump>` like `wp-release` expects. Commit the generated file with the change. With one package, `add` selects it automatically; with several, it prompts in a terminal or requires one repeatable `--package NAME` per affected package. Like `wp-release changeset-add`, `--package a --bump minor --package b --bump patch` writes a different bump per package:
+A single changeset may release several packages by listing one `package: bump` mapping per line, so the frontmatter is a `Record<package name, bump>` like `wp-release` expects. Commit the generated file with the change. With one package, `add` selects it automatically; with several, it prompts in a terminal or requires one repeatable `--package NAME` per affected package. Like `wp-release changeset add`, `--package a --bump minor --package b --bump patch` writes a different bump per package:
 
 ```sh
 vendor/bin/changeset add --package example/alpha --bump minor --package plugins/beta --bump patch --summary "Share the settings screen."
