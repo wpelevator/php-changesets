@@ -1,8 +1,4 @@
----
-title: Development
----
-
-## Development
+# Development
 
 Classes live in `php/` with Composer classmap autoloading, and tests live in `tests/phpunit/`. The `bin/changeset` entry point loads `php/bootstrap.php` so it also runs directly from a checkout. Run the package tests from the monorepo root:
 

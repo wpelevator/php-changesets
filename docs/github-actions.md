@@ -1,6 +1,4 @@
----
-title: GitHub Actions
----
+# GitHub Actions
 
 ## Release with GitHub Actions
 

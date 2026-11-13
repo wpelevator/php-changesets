@@ -1,7 +1,8 @@
 ---
-title: php-changesets
 description: Prepare multi-package releases for PHP projects and monorepos with changeset Markdown files, PHP and Git.
 ---
+
+# php-changesets
 
 `wpelevator/php-changesets` releases WordPress plugins, themes and Composer packages from changeset Markdown files, with PHP and Git and without Node.js. It's for projects that don't use Node.js or JavaScript tooling: a Composer dependency replaces an npm one, and nothing needs installing in CI beyond PHP. It follows the release model of [`wp-release`](../../../js/wp-release/docs/index.md), the Node.js release tool of WP Elevator, so both tools read the same changesets, take the same command options and produce the same release plans.
 
