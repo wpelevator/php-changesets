@@ -1,8 +1,4 @@
----
-title: Comparison with wp-release
----
-
-## Comparison with wp-release
+# Comparison with wp-release
 
 PHP Changesets is the PHP counterpart of the `changeset` commands of [`wp-release`](../../../js/wp-release/docs/index.md), for projects that release with PHP and Git alone and don't use Node.js or JavaScript. Choose `wp-release` when the project already has a Node.js toolchain, or needs its builds, ZIPs, translations and deploys, and PHP Changesets when Composer is the only package manager. Both read the same changeset files and print the same `releases[]` plan, so a repository can switch between them.
 

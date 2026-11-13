@@ -1,8 +1,4 @@
----
-title: Configuration
----
-
-## Configuration
+# Configuration
 
 The configuration lives in `changesets.config.php` at the project root, the analog of `wp-release.config.mjs`. The global `--config PATH` selects another file for one command.
 

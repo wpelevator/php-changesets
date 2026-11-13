@@ -1,6 +1,4 @@
----
-title: Command line
----
+# Command line
 
 ## Commands
 
